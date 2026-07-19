@@ -116,6 +116,86 @@
 
 ---
 
+## 📦 完整安装指南（含依赖下载）
+
+> 💡 由于 GitHub 单文件大小限制，ffmpeg 和 Vosk 语音模型没有包含在仓库中。手动安装 Mod 时需要额外下载以下依赖。
+>
+> 如果你是通过 **Steam 创意工坊**订阅的，则无需手动下载，创意工坊会自动提供完整文件。
+
+### 依赖一：FFmpeg（用于音视频处理）
+
+FFmpeg 用于「执行命令行」工具中的音视频转码等功能。
+
+**下载步骤：**
+1. 前往 FFmpeg 官网下载：[https://ffmpeg.org/download.html](https://ffmpeg.org/download.html)
+2. 下载 Windows 版本的 `ffmpeg-release-essentials.zip`
+3. 解压后找到以下三个文件：
+   - `ffmpeg.exe`
+   - `ffplay.exe`
+   - `ffprobe.exe`
+4. 将这三个文件放到 Mod 目录下的 `plugin/ffmpeg/` 文件夹中
+
+**目录结构：**
+```
+plugin/
+  └── ffmpeg/
+       ├── ffmpeg.exe
+       ├── ffplay.exe
+       └── ffprobe.exe
+```
+
+### 依赖二：Vosk 中文语音模型（用于语音输入）
+
+Vosk 模型用于离线语音识别，实现语音对话功能。
+
+**下载步骤：**
+1. 前往 Vosk 官网下载中文模型：[https://alphacephei.com/vosk/models](https://alphacephei.com/vosk/models)
+2. 下载 `vosk-model-small-cn-0.22` 或 `vosk-model-cn-0.22`（推荐小模型，体积小且识别速度快）
+3. 解压整个文件夹
+4. 将解压后的文件夹重命名为 `vosk-model-cn-0.22`
+5. 放到 Mod 目录下的 `plugin/` 文件夹中
+
+**目录结构：**
+```
+plugin/
+  └── vosk-model-cn-0.22/
+       ├── am/
+       ├── conf/
+       ├── graph/
+       ├── ivector/
+       └── README
+```
+
+### 验证安装
+
+完成以上步骤后，Mod 目录结构应该如下：
+
+```
+PetChat/
+  ├── img/
+  ├── lang/
+  ├── plugin/
+  │    ├── ffmpeg/
+  │    │    ├── ffmpeg.exe
+  │    │    ├── ffplay.exe
+  │    │    └── ffprobe.exe
+  │    ├── vosk-model-cn-0.22/
+  │    │    ├── am/
+  │    │    ├── conf/
+  │    │    ├── graph/
+  │    │    └── ivector/
+  │    ├── VPet.Plugin.PetChat.dll
+  │    └── ... (其他 dll 文件)
+  ├── src/
+  ├── icon.png
+  ├── info.lps
+  └── README.md
+```
+
+启动 VPet 后，如果语音功能可以正常使用，说明安装成功了喵~
+
+---
+
 ## 📖 使用说明
 
 ### 语音对话
