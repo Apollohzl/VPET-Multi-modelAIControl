@@ -1,0 +1,22 @@
+﻿{
+  "name": "BoDianMusicOneSongMessagesSearch",
+  "description": "\u8FD9\u4E2A\u5DE5\u5177\u9700\u8981\u4E0E\u6CE2\u70B9\u97F3\u4E50\u6B4C\u66F2\u641C\u7D22\u7ED3\u5408\uFF0C\u901A\u8FC7\u641C\u7D22\u627E\u5230\u9700\u8981\u7684\u6B4C\u66F2\u7684\u7D22\u5F15\uFF081\u5F00\u59CB\uFF0C\u4E0D\u662F0\uFF09\uFF0C\u7136\u540E\u8FD9\u4E2A\u7D22\u5F15\u4E3An\u53C2\u6570\uFF0Csearchname\u53C2\u6570\u4E3A\u8C03\u7528\u641C\u7D22\u5DE5\u5177\u65F6\u7684\u641C\u7D22\u5185\u5BB9\uFF0C\u4E0D\u80FD\u6539\u53D8",
+  "summary": "VIP\u6B4C\u66F2\u67E5",
+  "parameters": [
+    {
+      "name": "searchname",
+      "type": "string",
+      "required": true,
+      "defaultValue": "",
+      "description": "\u8C03\u7528\u641C\u7D20\u5DE5\u5177\u65F6\u4F7F\u7528\u7684\u641C\u7D20\u5185\u5BB9"
+    },
+    {
+      "name": "n",
+      "type": "string",
+      "required": true,
+      "defaultValue": "",
+      "description": "\u8C03\u7528\u641C\u7D20\u5DE5\u5177\u65F6\u641C\u7D20\u5230\u7684\u5185\u5BB9\u4E2D\uFF0C\u9009\u5B9A\u7684\u6B4C\u66F2\u7684\u7D22\u5F15\u6570\u5B57\uFF08\u4ECE1\u5F00\u59CB\uFF09"
+    }
+  ],
+  "code": "// ====== \u5DE5\u5177\u6267\u884C\u4EE3\u7801\u7F16\u5199\u8BF4\u660E ======\n// \u51FD\u6570\u7B7E\u540D\uFF1Apublic async Task\u003Cstring\u003E Execute(Dictionary\u003Cstring, object\u003E args)\n// - args[\u0022\u53C2\u6570\u540D\u0022] \u83B7\u53D6 AI \u4F20\u5165\u7684\u53C2\u6570\u503C\n// - \u8FD4\u56DE string \u7C7B\u578B\u7ED3\u679C\u7ED9 AI\n//\n// \u53EF\u7528 API\uFF1A\n// - System.IO\uFF1A\u6587\u4EF6\u8BFB\u5199\u64CD\u4F5C\n// - System.Diagnostics.Process\uFF1A\u542F\u52A8\u8FDB\u7A0B/\u6253\u5F00\u7F51\u9875\n// - System.Net.Http.HttpClient\uFF1A\u7F51\u7EDC\u8BF7\u6C42\n// - System.Text.Json\uFF1AJSON \u5904\u7406\n// - System.Text.RegularExpressions\uFF1A\u6B63\u5219\u5339\u914D\n//\n// \u793A\u4F8B\uFF1A\u6253\u5F00\u7F51\u9875\n// public async Task\u003Cstring\u003E Execute(Dictionary\u003Cstring, object\u003E args)\n// {\n//     var url = args[\u0022url\u0022]?.ToString();\n//     System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo\n//     {\n//         FileName = url,\n//         UseShellExecute = true\n//     });\n//     return $\u0022\u5DF2\u6253\u5F00\u7F51\u9875: {url}\u0022;\n// }\n// ================================\n\npublic async Task\u003Cstring\u003E Execute(Dictionary\u003Cstring, object\u003E args)\n{\n    // \u5728\u6B64\u7F16\u5199\u5DE5\u5177\u6267\u884C\u4EE3\u7801\n    var searchname = args[\u0022searchname\u0022]?.ToString();\n    var n = args[\u0022n\u0022]?.ToString();\n    \n    if (string.IsNullOrWhiteSpace(searchname) || string.IsNullOrWhiteSpace(n))\n    \treturn \u0022\u53C2\u6570\u7F3A\u5931\uFF1A\u9700\u8981\u8F93\u5165 searchname \u548C n\u0022;\n    var url = $\u0022https://api.xingzhige.com/API/Kuwo_BD_new/?name={Uri.EscapeDataString(searchname)}\u0026n={Uri.EscapeDataString(n)}\u0022;\n    \n    using var httpClient = new System.Net.Http.HttpClient();\n    var response = await httpClient.GetAsync(url);\n    var json = await response.Content.ReadAsStringAsync();\n    \n\n    return json;\n}"
+}

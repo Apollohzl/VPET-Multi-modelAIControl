@@ -1,0 +1,74 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <RootNamespace>VPet.Plugin.PetChat</RootNamespace>
+    <AssemblyName>VPet.Plugin.PetChat</AssemblyName>
+    <OutputPath>..\plugin\</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+    <NoWarn>1705;3277</NoWarn>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <SatelliteResourceLanguages>zh-Hans;en</SatelliteResourceLanguages>
+    <VPetPath Condition="Exists('$(VPetPath)')">$(VPetPath)</VPetPath>
+    <VPetPath Condition="!Exists('$(VPetPath)') and Exists('$(VPET_PATH)')">$(VPET_PATH)</VPetPath>
+    <VPetPath Condition="!Exists('$(VPetPath)') and Exists('F:\SteamLibrary\steamapps\common\VPet')">F:\SteamLibrary\steamapps\common\VPet</VPetPath>
+    <VPetPath Condition="!Exists('$(VPetPath)') and Exists('C:\Program Files (x86)\Steam\steamapps\common\VPet')">C:\Program Files (x86)\Steam\steamapps\common\VPet</VPetPath>
+    <VPetPath Condition="!Exists('$(VPetPath)') and Exists('C:\Program Files\Steam\steamapps\common\VPet')">C:\Program Files\Steam\steamapps\common\VPet</VPetPath>
+    <VPetPath Condition="!Exists('$(VPetPath)') and Exists('$(SolutionDir)..\..\VPet')">$(SolutionDir)..\..\VPet</VPetPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="VPet-Simulator.Windows.Interface">
+      <HintPath>$(VPetPath)\VPet-Simulator.Windows.Interface.dll</HintPath>
+      <Private>false</Private>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </Reference>
+    <Reference Include="VPet-Simulator.Core">
+      <HintPath>$(VPetPath)\VPet-Simulator.Core.dll</HintPath>
+      <Private>false</Private>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </Reference>
+    <Reference Include="LinePutScript">
+      <HintPath>$(VPetPath)\LinePutScript.dll</HintPath>
+      <Private>false</Private>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </Reference>
+    <Reference Include="LinePutScript.Localization.WPF">
+      <HintPath>$(VPetPath)\LinePutScript.Localization.WPF.dll</HintPath>
+      <Private>false</Private>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </Reference>
+    <Reference Include="Panuon.WPF.UI">
+      <HintPath>$(VPetPath)\Panuon.WPF.UI.dll</HintPath>
+      <Private>false</Private>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </Reference>
+    <Reference Include="Panuon.WPF">
+      <HintPath>$(VPetPath)\Panuon.WPF.dll</HintPath>
+      <Private>false</Private>
+      <ExcludeAssets>runtime</ExcludeAssets>
+    </Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="AvalonEdit" Version="6.3.0.90" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Scripting" Version="4.9.2" />
+    <PackageReference Include="DocumentFormat.OpenXml" Version="3.0.2" />
+    <PackageReference Include="iTextSharp" Version="5.5.13.3" />
+    <PackageReference Include="ZXing.Net" Version="0.16.8" />
+    <PackageReference Include="System.Management" Version="8.0.0" />
+    <PackageReference Include="NAudio" Version="2.2.1" />
+    <PackageReference Include="Vosk" Version="0.3.38" />
+  </ItemGroup>
+
+  <Target Name="CleanNativeDllsFromOutput" AfterTargets="Build">
+    <Delete Files="$(OutputPath)libvosk.dll" />
+    <Delete Files="$(OutputPath)libwinpthread-1.dll" />
+    <Delete Files="$(OutputPath)libstdc++-6.dll" />
+    <Delete Files="$(OutputPath)libgcc_s_seh-1.dll" />
+    <Message Text="已清理输出目录中的原生 DLL，仅保留 runtimes/win-x64/native/ 中的版本" Importance="high" />
+  </Target>
+</Project>

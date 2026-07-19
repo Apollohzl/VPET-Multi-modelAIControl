@@ -1,0 +1,4 @@
+models_url#https://hzliflow.ken520.top/api/ai/models:|
+chat_url#https://hzliflow.ken520.top/api/v1/chat/completions:|
+balance_url#https://hzliflow.ken520.top/api/account/balance:|
+api_key_in_body#true:|

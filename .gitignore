@@ -1,0 +1,43 @@
+# Build results
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Bb]in/
+[Oo]bj/
+
+# Visual Studio
+.vs/
+.vscode/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# NuGet
+packages/
+*.nupkg
+
+# IDE
+.idea/
+
+# Logs
+logs/
+*.log
+chat_history.json
+plugin_settings.lps
+Chat_Historys/
+
+# Debug symbols
+*.pdb
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Large binaries (exceed GitHub 100MB limit)
+plugin/ffmpeg/
+plugin/vosk-model-cn-0.22/
+
+# Backup files
+*.bak

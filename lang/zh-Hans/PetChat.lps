@@ -1,0 +1,17 @@
+SignInTip#bilibili@apollo小黄,要想使用这个对话模组，请点击下面按钮跳转到 https://enter.pollinations.ai/sign-in页面内并注册,然后点击Keys→Add Key→设置一个喜欢的Name→预算和过期时间不填→Profile,Usage,Key Management,Models按钮全部选择→Create→复制API Key:|
+SignInButton#点击跳转 https://enter.pollinations.ai/sign-in:|
+ApiKeyLabel#API Key:|
+ApiKeyPlaceholder#按照上方要求复制API Key输入:|
+ModelsLabel#Models:|
+ModelsLoading#加载中...:|
+ModelsFailed#模型列表加载失败，点击重试:|
+RolePromptLabel#角色设定:|
+BalanceLabel#目前余额:|
+BalanceLoading#查询中...:|
+BalanceFailed#余额查询失败:|
+BalanceResult#剩余 {0} 花粉:|
+SaveButton#保存设置:|
+SavedMessage#设置已保存:|
+ErrorHttp#对话请求错误:|
+ErrorUnknown#未知错误:|
+Thinking#思考中...:|
