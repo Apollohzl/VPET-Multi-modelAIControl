@@ -172,20 +172,18 @@ internal static class ApiClient
 
     /// <summary>
     /// 查询账户余额(花粉)。
-    /// 固定使用 POST 请求，API Key 通过 Authorization Header 传递。
+    /// 使用 GET 请求，API Key 通过 Authorization Header 传递。
     /// </summary>
     public static async Task<(bool ok, decimal pollen, string error)> GetBalanceAsync(string apiKey)
     {
-        // 固定使用官方余额查询接口，不允许通过参数覆盖
         const string balanceUrl = "https://gen.pollinations.ai/account/balance";
 
         if (string.IsNullOrWhiteSpace(apiKey)) return (false, 0, "错误: 未提供 API Key");
 
         try
         {
-            using var req = new HttpRequestMessage(HttpMethod.Post, balanceUrl);
+            using var req = new HttpRequestMessage(HttpMethod.Get, balanceUrl);
             req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
-            req.Content = new StringContent(string.Empty, Encoding.UTF8, "application/json");
 
             using var resp = await _http.SendAsync(req);
             if (!resp.IsSuccessStatusCode)

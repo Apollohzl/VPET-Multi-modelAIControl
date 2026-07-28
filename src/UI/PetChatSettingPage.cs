@@ -1678,19 +1678,20 @@ public class PetChatSettingPage : UserControl
             string path = Path.Combine(pluginDir, "plugin_settings.lps");
             if (!File.Exists(path)) return string.Empty;
 
-            var settings = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var line in File.ReadAllLines(path))
+            string content = File.ReadAllText(path, Encoding.UTF8);
+            string[] parts = content.Split(new[] { ":|" }, StringSplitOptions.RemoveEmptyEntries);
+            foreach (var p in parts)
             {
-                if (string.IsNullOrWhiteSpace(line)) continue;
-                var trim = line.Trim();
-                if (trim.StartsWith("#")) continue;
-                int idx = trim.IndexOf('=');
-                if (idx <= 0) continue;
-                string k = trim.Substring(0, idx).Trim();
-                string v = trim.Substring(idx + 1).Trim();
-                settings[k] = v;
+                int idx = p.IndexOf('#');
+                if (idx > 0)
+                {
+                    string key = p.Substring(0, idx).Trim();
+                    string val = p.Substring(idx + 1).Trim();
+                    if (string.Equals(key, "api_key", StringComparison.OrdinalIgnoreCase))
+                        return val;
+                }
             }
-            return settings.TryGetValue("api_key", out var key) ? key : string.Empty;
+            return string.Empty;
         }
         catch
         {

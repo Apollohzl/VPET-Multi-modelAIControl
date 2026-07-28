@@ -86,7 +86,7 @@ public class PetChatPlugin : MainPlugin
                        (endpoints.TryGetValue("models", out var m) ? m : "https://text.pollinations.ai/models");
             ChatUrl = endpoints.TryGetValue("chat_url", out var cu) ? cu :
                       (endpoints.TryGetValue("chat", out var c) ? c : "https://text.pollinations.ai/");
-            // 余额查询接口固定为官方地址，不允许通过配置覆盖
+            // 余额查询接口
             _balanceUrl = "https://gen.pollinations.ai/account/balance";
 
             SavedApiKey = settings.TryGetValue("api_key", out var k) ? k : string.Empty;
