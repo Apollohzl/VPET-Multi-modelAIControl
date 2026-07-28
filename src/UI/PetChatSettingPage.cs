@@ -1642,17 +1642,22 @@ public class PetChatSettingPage : UserControl
         {
             // 优先使用用户保存到本地文件中的 API Key
             string apiKey = ReadSavedApiKey();
+            Logger.Info($"[Balance] ReadSavedApiKey 返回: {(string.IsNullOrEmpty(apiKey) ? "(空)" : apiKey.Substring(0, Math.Min(8, apiKey.Length)) + "...(已脱敏)")}");
+
             if (string.IsNullOrWhiteSpace(apiKey))
             {
                 // 本地文件没有保存时，回退到输入框中的内容
                 Dispatcher.Invoke(() => apiKey = _apiKeyBox.Text);
+                Logger.Info("[Balance] 回退到输入框中的 API Key");
             }
             if (string.IsNullOrWhiteSpace(apiKey))
             {
+                Logger.Warn("[Balance] 未提供 API Key");
                 Dispatcher.Invoke(() => _balanceText.Text = "余额: 未提供 API Key");
                 return;
             }
             var (ok, pollen, err) = await ApiClient.GetBalanceAsync(apiKey);
+            Logger.Info($"[Balance] 查询结果: ok={ok}, pollen={pollen}, err={err}");
             Dispatcher.Invoke(() =>
             {
                 if (ok)
@@ -1663,6 +1668,7 @@ public class PetChatSettingPage : UserControl
         }
         catch (Exception ex)
         {
+            Logger.Error("[Balance] LoadBalanceAsync 异常", ex);
             Dispatcher.Invoke(() => _balanceText.Text = "余额查询失败: " + ex.Message);
         }
     }
@@ -1676,10 +1682,20 @@ public class PetChatSettingPage : UserControl
         {
             string pluginDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? Directory.GetCurrentDirectory();
             string path = Path.Combine(pluginDir, "plugin_settings.lps");
-            if (!File.Exists(path)) return string.Empty;
+            Logger.Info($"[Balance] 读取配置文件: {path}");
+
+            if (!File.Exists(path))
+            {
+                Logger.Warn($"[Balance] 配置文件不存在: {path}");
+                return string.Empty;
+            }
 
             string content = File.ReadAllText(path, Encoding.UTF8);
+            Logger.Info($"[Balance] 配置文件内容: {TruncateForLog(content, 500)}");
+
             string[] parts = content.Split(new[] { ":|" }, StringSplitOptions.RemoveEmptyEntries);
+            Logger.Info($"[Balance] 解析出 {parts.Length} 个配置项");
+
             foreach (var p in parts)
             {
                 int idx = p.IndexOf('#');
@@ -1687,16 +1703,35 @@ public class PetChatSettingPage : UserControl
                 {
                     string key = p.Substring(0, idx).Trim();
                     string val = p.Substring(idx + 1).Trim();
+                    Logger.Info($"[Balance] 配置项: {key} = {(key == "api_key" ? MaskKey(val) : val)}");
                     if (string.Equals(key, "api_key", StringComparison.OrdinalIgnoreCase))
+                    {
+                        Logger.Info($"[Balance] 找到 API Key: {MaskKey(val)}");
                         return val;
+                    }
                 }
             }
+            Logger.Warn("[Balance] 未找到 api_key 配置项");
             return string.Empty;
         }
-        catch
+        catch (Exception ex)
         {
+            Logger.Error("[Balance] ReadSavedApiKey 异常", ex);
             return string.Empty;
         }
+    }
+
+    private string MaskKey(string key)
+    {
+        if (string.IsNullOrEmpty(key)) return "(空)";
+        if (key.Length <= 8) return "****";
+        return key.Substring(0, 4) + "****" + key.Substring(key.Length - 4);
+    }
+
+    private string TruncateForLog(string text, int maxLen = 2000)
+    {
+        if (string.IsNullOrEmpty(text)) return "(空)";
+        return text.Length > maxLen ? text.Substring(0, maxLen) + "...(已截断)" : text;
     }
 
     // ==================== 测试对话 ====================

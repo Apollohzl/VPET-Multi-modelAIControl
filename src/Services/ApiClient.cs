@@ -180,22 +180,41 @@ internal static class ApiClient
 
         if (string.IsNullOrWhiteSpace(apiKey)) return (false, 0, "错误: 未提供 API Key");
 
+        Logger.Info($"[Balance] 开始查询余额, URL={balanceUrl}, API Key={MaskApiKey(apiKey)}");
+
         try
         {
             using var req = new HttpRequestMessage(HttpMethod.Get, balanceUrl);
             req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
+            req.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+
+            Logger.Info($"[Balance] 发送 GET 请求, Headers: Authorization=Bearer {MaskApiKey(apiKey)}");
 
             using var resp = await _http.SendAsync(req);
+            var statusCode = (int)resp.StatusCode;
+            var reasonPhrase = resp.ReasonPhrase;
+            var jsonStr = await resp.Content.ReadAsStringAsync();
+
+            Logger.Info($"[Balance] 响应状态: {statusCode} {reasonPhrase}");
+            Logger.Info($"[Balance] 响应内容: {TruncateForLog(jsonStr)}");
+
             if (!resp.IsSuccessStatusCode)
             {
-                return (false, 0, "错误: " + (int)resp.StatusCode + " " + resp.ReasonPhrase);
+                Logger.Error($"[Balance] 请求失败: {statusCode} {reasonPhrase}, 响应: {TruncateForLog(jsonStr)}");
+                return (false, 0, $"错误: {statusCode} {reasonPhrase}");
             }
-            var jsonStr = await resp.Content.ReadAsStringAsync();
-            return ParsePollen(jsonStr);
+
+            var result = ParsePollen(jsonStr);
+            if (result.ok)
+                Logger.Info($"[Balance] 查询成功, 花粉={result.pollen}");
+            else
+                Logger.Error($"[Balance] 解析失败: {result.error}");
+            return result;
         }
         catch (Exception ex)
         {
-            return (false, 0, "错误: " + ex.Message);
+            Logger.Error($"[Balance] 查询异常: {ex.Message}\n{ex.StackTrace}");
+            return (false, 0, $"错误: {ex.Message}");
         }
     }
 
