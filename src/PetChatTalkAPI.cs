@@ -12,8 +12,6 @@ using VPet.Plugin.PetChat.Models;
 using VPet.Plugin.PetChat.Services;
 using VPet_Simulator.Core;
 using VPet_Simulator.Windows.Interface;
-using Vosk;
-using NAudio.Wave;
 
 namespace VPet.Plugin.PetChat;
 
@@ -22,7 +20,6 @@ public class PetChatTalkAPI : TalkBox
     public PetChatTalkAPI(PetChatPlugin plugin) : base(plugin)
     {
         Plugin = plugin;
-        AddVoiceButton();
     }
 
     protected PetChatPlugin Plugin;
@@ -65,7 +62,25 @@ public class PetChatTalkAPI : TalkBox
         if (string.IsNullOrWhiteSpace(content) && !Plugin.HasPendingAttachments)
             return;
 
-        if (string.IsNullOrWhiteSpace(Plugin.SavedApiKey) || string.IsNullOrWhiteSpace(Plugin.SavedModel))
+        // 根据供应商选择对应的 API Key 和模型
+        bool isDeepseek = Plugin.IsDeepseekProvider;
+        bool isFileRestricted = isDeepseek;
+
+        string activeApiKey, activeModel, activeChatUrl;
+        if (isDeepseek)
+        {
+            activeApiKey = Plugin.SavedDeepseekApiKey;
+            activeModel = Plugin.SavedDeepseekModel;
+            activeChatUrl = Plugin.DeepseekChatUrl;
+        }
+        else
+        {
+            activeApiKey = Plugin.SavedApiKey;
+            activeModel = Plugin.SavedModel;
+            activeChatUrl = Plugin.ChatUrl;
+        }
+
+        if (string.IsNullOrWhiteSpace(activeApiKey) || string.IsNullOrWhiteSpace(activeModel))
         {
             Dispatcher.Invoke(() =>
             {
@@ -107,21 +122,25 @@ public class PetChatTalkAPI : TalkBox
                     CallMainSayStream(main, sis);
                 });
 
-                // 4. 获取暂存的附件
-                var pendingAttachments = Plugin.GetPendingAttachments();
+                // 4. 获取暂存的附件(文件限制供应商不支持附件)
+                var pendingAttachments = isFileRestricted
+                    ? new System.Collections.Generic.List<Models.ContentItem>()
+                    : Plugin.GetPendingAttachments();
 
                 // 5. 使用 ChatBridge 处理对话（含工具调用和附件）
+                //    文件限制供应商使用 Bearer Token 认证,且不支持任何文件输入
                 var chatBridge = new ChatBridge(
-                    Plugin.SavedApiKey,
-                    Plugin.SavedModel,
+                    activeApiKey,
+                    activeModel,
                     Plugin.SavedSystemPrompt,
                     Plugin.MW,
-                    Plugin.ChatUrl,
+                    activeChatUrl,
                     Plugin.SkillManager,
                     Plugin.HistoryStore,
-                    Plugin.SavedModelSupportsImage,
-                    Plugin.SavedModelSupportsAudio,
-                    Plugin.SavedModelSupportsVideo
+                    isFileRestricted ? false : Plugin.SavedModelSupportsImage,
+                    isFileRestricted ? false : Plugin.SavedModelSupportsAudio,
+                    isFileRestricted ? false : Plugin.SavedModelSupportsVideo,
+                    isFileRestricted
                 );
 
                 if (pendingAttachments.Count > 0)
@@ -136,6 +155,7 @@ public class PetChatTalkAPI : TalkBox
                     await chatBridge.SendChatAsync(content ?? string.Empty, sis, cts.Token);
                 }
 
+                Logger.Info($"[Chat] 对话完成, 供应商={(isDeepseek ? "Deepseek" : "pollenations")}, 模型={activeModel}");
                 // ChatBridge 已在对话过程中完成保存，无需重复保存
             }
             catch (OperationCanceledException)
@@ -193,215 +213,4 @@ public class PetChatTalkAPI : TalkBox
 
     public override void Setting() => Plugin.OpenSettingWindow();
 
-    private Button? _btnVoice;
-    private bool _isRecording;
-    private Model? _voskModel;
-    private WaveInEvent? _waveIn;
-    private VoskRecognizer? _recognizer;
-    private CancellationTokenSource? _cts;
-
-    /// <summary>
-    /// 在发送按钮右侧添加语音按钮。
-    /// </summary>
-    private void AddVoiceButton()
-    {
-        if (MainGrid == null) return;
-
-        MainGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(5) });
-        MainGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-
-        _btnVoice = new Button
-        {
-            Content = "语音",
-            BorderThickness = new Thickness(2),
-            FontSize = 30,
-            ToolTip = "点击开始语音输入",
-        };
-
-        if (btnSend?.Background != null)
-            _btnVoice.Background = btnSend.Background;
-        if (btnSend?.BorderBrush != null)
-            _btnVoice.BorderBrush = btnSend.BorderBrush;
-        if (btnSend?.Style != null)
-            _btnVoice.Style = btnSend.Style;
-
-        ButtonHelper.SetCornerRadius(_btnVoice, new CornerRadius(4));
-
-        _btnVoice.Click += async (s, e) => await ToggleVoiceRecognition();
-
-        Grid.SetColumn(_btnVoice, 4);
-        Grid.SetRow(_btnVoice, 0);
-        MainGrid.Children.Add(_btnVoice);
-    }
-
-    private async Task ToggleVoiceRecognition()
-    {
-        if (_isRecording)
-        {
-            await StopVoiceRecognition();
-        }
-        else
-        {
-            await StartVoiceRecognition();
-        }
-    }
-
-    private async Task StartVoiceRecognition()
-    {
-        try
-        {
-            if (_btnVoice == null) return;
-
-            _isRecording = true;
-            _cts = new CancellationTokenSource();
-
-            Dispatcher.Invoke(() =>
-            {
-                _btnVoice.Content = "停止";
-                _btnVoice.ToolTip = "点击停止语音输入";
-                if (tbTalk != null)
-                    tbTalk.IsEnabled = false;
-            });
-
-            string modelPath = Path.Combine(
-                Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? "",
-                "vosk-model-cn-0.22"
-            );
-
-            if (!Directory.Exists(modelPath))
-            {
-                Logger.Error($"[Voice] Vosk模型目录不存在: {modelPath}");
-                await StopVoiceRecognition();
-                return;
-            }
-
-            _voskModel = new Model(modelPath);
-            _recognizer = new VoskRecognizer(_voskModel, 16000.0f);
-
-            int deviceNumber = 0;
-            if (!string.IsNullOrWhiteSpace(Plugin.SavedMicrophoneDevice) && int.TryParse(Plugin.SavedMicrophoneDevice, out int savedDeviceId))
-            {
-                deviceNumber = savedDeviceId;
-            }
-
-            _waveIn = new WaveInEvent
-            {
-                DeviceNumber = deviceNumber,
-                WaveFormat = new WaveFormat(16000, 16, 1)
-            };
-
-            Logger.Info($"[Voice] 使用麦克风设备: {deviceNumber}");
-
-            _waveIn.DataAvailable += (s, e) =>
-            {
-                try
-                {
-                    if (_recognizer == null || _cts?.Token.IsCancellationRequested == true) return;
-
-                    if (_recognizer.AcceptWaveform(e.Buffer, e.BytesRecorded))
-                    {
-                        var result = _recognizer.Result();
-                        var json = System.Text.Json.JsonDocument.Parse(result);
-                        if (json.RootElement.TryGetProperty("text", out var textElem))
-                        {
-                            string recognizedText = textElem.GetString() ?? "";
-                            if (!string.IsNullOrWhiteSpace(recognizedText))
-                            {
-                                Dispatcher.Invoke(() =>
-                                {
-                                    if (tbTalk != null)
-                                tbTalk.Text += recognizedText;
-                                });
-                            }
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error("[Voice] 识别过程出错", ex);
-                }
-            };
-
-            _waveIn.RecordingStopped += (s, e) =>
-            {
-                try
-                {
-                    if (_recognizer != null && !_cts?.Token.IsCancellationRequested == true)
-                    {
-                        var finalResult = _recognizer.FinalResult();
-                        var json = System.Text.Json.JsonDocument.Parse(finalResult);
-                        if (json.RootElement.TryGetProperty("text", out var textElem))
-                        {
-                            string recognizedText = textElem.GetString() ?? "";
-                            if (!string.IsNullOrWhiteSpace(recognizedText))
-                            {
-                                Dispatcher.Invoke(() =>
-                                {
-                                    if (tbTalk != null)
-                                tbTalk.Text += recognizedText;
-                                });
-                            }
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error("[Voice] 获取最终结果出错", ex);
-                }
-            };
-
-            _waveIn.StartRecording();
-            Logger.Info("[Voice] 语音识别已启动");
-        }
-        catch (Exception ex)
-        {
-            Logger.Error("[Voice] 启动语音识别失败", ex);
-            await StopVoiceRecognition();
-        }
-    }
-
-    private async Task StopVoiceRecognition()
-    {
-        try
-        {
-            _isRecording = false;
-            _cts?.Cancel();
-
-            if (_waveIn != null)
-            {
-                _waveIn.StopRecording();
-                _waveIn.Dispose();
-                _waveIn = null;
-            }
-
-            if (_recognizer != null)
-            {
-                _recognizer.Dispose();
-                _recognizer = null;
-            }
-
-            if (_voskModel != null)
-            {
-                _voskModel.Dispose();
-                _voskModel = null;
-            }
-
-            Dispatcher.Invoke(() =>
-            {
-                if (_btnVoice != null)
-                {
-                    _btnVoice.Content = "语音";
-                    _btnVoice.ToolTip = "点击开始语音输入";
-                }
-                if (tbTalk != null)
-                    tbTalk.IsEnabled = true;
-            });
-
-            Logger.Info("[Voice] 语音识别已停止");
-        }
-        catch (Exception ex)
-        {
-            Logger.Error("[Voice] 停止语音识别失败", ex);
-        }
-    }
 }

@@ -18,15 +18,30 @@ public class PetChatPlugin : MainPlugin
     private string _modelsUrl = string.Empty;
     public string ChatUrl { get; private set; } = string.Empty;
     private string _balanceUrl = string.Empty;
+    private bool _apiKeyInBody = false;
 
+    // Deepseek 官方端点
+    public string DeepseekChatUrl => Models.DeepseekEndpoints.ChatUrl;
+
+    public string SavedProvider { get; private set; } = Models.ProviderNames.Pollenations;
     public string SavedApiKey { get; private set; } = string.Empty;
     public string SavedModel { get; private set; } = string.Empty;
+    public string SavedDeepseekApiKey { get; private set; } = string.Empty;
+    public string SavedDeepseekModel { get; private set; } = string.Empty;
     public bool SavedModelSupportsImage { get; private set; } = true;
     public bool SavedModelSupportsAudio { get; private set; } = false;
     public bool SavedModelSupportsVideo { get; private set; } = false;
     public string SavedSystemPrompt { get; private set; } = string.Empty;
     public string SavedLogDir { get; private set; } = string.Empty;
-    public string SavedMicrophoneDevice { get; private set; } = string.Empty;
+
+    /// <summary>配置文件路径(plugin_settings.json)</summary>
+    private string _settingsPath = string.Empty;
+
+    /// <summary>当前是否使用 Deepseek 供应商</summary>
+    public bool IsDeepseekProvider => string.Equals(SavedProvider, Models.ProviderNames.Deepseek, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>当前供应商是否限制文件上传（Deepseek 不支持）</summary>
+    public bool IsFileRestrictedProvider => IsDeepseekProvider;
 
     // 文件拖拽服务(单例,绑定到主窗口)
     public Services.FileDropService FileDropService { get; private set; } = null!;
@@ -77,23 +92,35 @@ public class PetChatPlugin : MainPlugin
     {
         try
         {
-            SetupNativeDllPath();
-
             var endpoints = GetEndpointsLps();
-            var settings = GetPluginSettingsLps();
 
             _modelsUrl = endpoints.TryGetValue("models_url", out var mu) ? mu :
                        (endpoints.TryGetValue("models", out var m) ? m : "https://text.pollinations.ai/models");
             ChatUrl = endpoints.TryGetValue("chat_url", out var cu) ? cu :
                       (endpoints.TryGetValue("chat", out var c) ? c : "https://text.pollinations.ai/");
-            // 余额查询接口
-            _balanceUrl = "https://gen.pollinations.ai/account/balance";
+            // 余额查询接口：优先使用配置文件 endpoints.lps 中的 balance_url
+            // （与 chat/models 一致指向网关，例如 hzliflow.ken520.top），缺失时回退到 pollinations 官方地址
+            _balanceUrl = endpoints.TryGetValue("balance_url", out var bu) && !string.IsNullOrWhiteSpace(bu)
+                ? bu
+                : "https://gen.pollinations.ai/account/balance";
+            _apiKeyInBody = endpoints.TryGetValue("api_key_in_body", out var aib) && aib.Equals("true", StringComparison.OrdinalIgnoreCase);
 
-            SavedApiKey = settings.TryGetValue("api_key", out var k) ? k : string.Empty;
-            SavedModel = settings.TryGetValue("model", out var mo) ? mo : string.Empty;
-            SavedSystemPrompt = settings.TryGetValue("system_prompt", out var sp) && !string.IsNullOrWhiteSpace(sp) ? sp : DefaultSystemPrompt;
-            SavedLogDir = settings.TryGetValue("log_dir", out var ld) && !string.IsNullOrWhiteSpace(ld) ? ld : string.Empty;
-            SavedMicrophoneDevice = settings.TryGetValue("microphone_device", out var md) ? md : string.Empty;
+            // 使用 JSON 配置文件（先检测并迁移旧版 LPS 配置）
+            var pluginDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? Directory.GetCurrentDirectory();
+            Models.PluginSettings.MigrateFromLps(pluginDir);
+            _settingsPath = Models.PluginSettings.GetDefaultPath(pluginDir);
+            var settings = Models.PluginSettings.Load(_settingsPath);
+
+            SavedProvider = string.IsNullOrEmpty(settings.provider) ? Models.ProviderNames.Pollenations : settings.provider;
+            SavedApiKey = settings.api_key ?? string.Empty;
+            SavedModel = settings.model ?? string.Empty;
+            SavedDeepseekApiKey = settings.deepseek_api_key ?? string.Empty;
+            SavedDeepseekModel = settings.deepseek_model ?? string.Empty;
+            SavedModelSupportsImage = settings.model_supports_image;
+            SavedModelSupportsAudio = settings.model_supports_audio;
+            SavedModelSupportsVideo = settings.model_supports_video;
+            SavedSystemPrompt = !string.IsNullOrWhiteSpace(settings.system_prompt) ? settings.system_prompt : DefaultSystemPrompt;
+            SavedLogDir = !string.IsNullOrWhiteSpace(settings.log_dir) ? settings.log_dir : string.Empty;
             if (!string.IsNullOrWhiteSpace(SavedLogDir))
                 Logger.LogDirectory = SavedLogDir;
 
@@ -105,9 +132,10 @@ public class PetChatPlugin : MainPlugin
             CheckUnfinishedCommands();
 
             // 初始化工具管理器
-            var pluginDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? Directory.GetCurrentDirectory();
             SkillManager = new SkillManager(pluginDir);
             SkillManager.LoadSkills();
+            // 从 JSON 配置加载已启用的工具
+            SkillManager.LoadEnabledSkills(settings);
 
             // 初始化文件拖拽服务并附加到主窗口
             FileDropService = new Services.FileDropService();
@@ -167,10 +195,10 @@ public class PetChatPlugin : MainPlugin
         {
             SaveChatHistory();
 
-            // 保存工具启用状态
-            var pluginDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? Directory.GetCurrentDirectory();
-            var settingsPath = Path.Combine(pluginDir, "plugin_settings.lps");
-            SkillManager?.SaveEnabledSkills(settingsPath);
+            // 保存工具启用状态到 JSON 配置
+            var settings = Models.PluginSettings.Load(_settingsPath);
+            SkillManager?.SaveEnabledSkills(settings);
+            settings.Save(_settingsPath);
         }
         catch
         {
@@ -198,9 +226,16 @@ public class PetChatPlugin : MainPlugin
 
     /// <summary>
     /// 文件拖拽事件处理: 播放动画(失败跳过),处理文件并暂存附件(等待用户发送消息时一起发送)。
+    /// 文件限制供应商不支持文件拖拽上传,会直接忽略。
     /// </summary>
     private async void OnFileDropped(string[] filePaths)
     {
+        // 文件限制供应商（Deepseek）不支持文件拖拽上传
+        if (IsFileRestrictedProvider)
+        {
+            Logger.Info($"[FileDrop] 当前供应商不支持文件拖拽上传,已忽略");
+            return;
+        }
         try
         {
             Logger.Info($"[FileDrop] 收到 {filePaths.Length} 个文件: {string.Join(", ", filePaths)}");
@@ -400,27 +435,6 @@ public class PetChatPlugin : MainPlugin
         }
     }
 
-    /// <summary>设置原生 DLL 搜索路径，确保 Vosk 等原生库能被找到。</summary>
-    private void SetupNativeDllPath()
-    {
-        try
-        {
-            string pluginDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? Directory.GetCurrentDirectory();
-            string nativeDllPath = Path.Combine(pluginDir, "runtimes", "win-x64", "native");
-            if (Directory.Exists(nativeDllPath))
-            {
-                string currentPath = Environment.GetEnvironmentVariable("PATH") ?? "";
-                if (!currentPath.Contains(nativeDllPath))
-                {
-                    Environment.SetEnvironmentVariable("PATH", $"{nativeDllPath};{currentPath}", EnvironmentVariableTarget.Process);
-                }
-            }
-        }
-        catch
-        {
-        }
-    }
-
     /// <summary>检测上次关闭时是否有未完成的命令执行。</summary>
     private void CheckUnfinishedCommands()
     {
@@ -586,9 +600,12 @@ public class PetChatPlugin : MainPlugin
                 Height = 600,
                 WindowStartupLocation = WindowStartupLocation.CenterScreen,
                 Content = new UI.PetChatSettingPage(
-                    this, MW, _modelsUrl, ChatUrl, _balanceUrl,
-                    SavedApiKey, SavedModel, SavedSystemPrompt,
-                    SavedLogDir, Logger.LogDirectory)
+                    this, MW, _modelsUrl, ChatUrl, _balanceUrl, _apiKeyInBody,
+                    SavedProvider, SavedApiKey,
+                    SavedModel, SavedDeepseekModel,
+                    SavedSystemPrompt,
+                    SavedLogDir, Logger.LogDirectory,
+                    SavedDeepseekApiKey)
             };
             window.ShowDialog();
 
@@ -602,19 +619,24 @@ public class PetChatPlugin : MainPlugin
         }
     }
 
+    /// <summary>配置文件路径,供设置页面读写 JSON 配置使用。</summary>
+    public string SettingsPath => _settingsPath;
+
     private void ReloadSettings()
     {
         try
         {
-            var settings = GetPluginSettingsLps();
-            SavedApiKey = settings.TryGetValue("api_key", out var k) ? k : string.Empty;
-            SavedModel = settings.TryGetValue("model", out var mo) ? mo : string.Empty;
-            SavedModelSupportsImage = settings.TryGetValue("model_supports_image", out var si) && si.Equals("true", StringComparison.OrdinalIgnoreCase);
-            SavedModelSupportsAudio = settings.TryGetValue("model_supports_audio", out var sa) && sa.Equals("true", StringComparison.OrdinalIgnoreCase);
-            SavedModelSupportsVideo = settings.TryGetValue("model_supports_video", out var sv) && sv.Equals("true", StringComparison.OrdinalIgnoreCase);
-            SavedSystemPrompt = settings.TryGetValue("system_prompt", out var sp) && !string.IsNullOrWhiteSpace(sp) ? sp : DefaultSystemPrompt;
-            SavedLogDir = settings.TryGetValue("log_dir", out var ld) && !string.IsNullOrWhiteSpace(ld) ? ld : string.Empty;
-            SavedMicrophoneDevice = settings.TryGetValue("microphone_device", out var md) ? md : string.Empty;
+            var settings = Models.PluginSettings.Load(_settingsPath);
+            SavedProvider = string.IsNullOrEmpty(settings.provider) ? Models.ProviderNames.Pollenations : settings.provider;
+            SavedApiKey = settings.api_key ?? string.Empty;
+            SavedModel = settings.model ?? string.Empty;
+            SavedDeepseekApiKey = settings.deepseek_api_key ?? string.Empty;
+            SavedDeepseekModel = settings.deepseek_model ?? string.Empty;
+            SavedModelSupportsImage = settings.model_supports_image;
+            SavedModelSupportsAudio = settings.model_supports_audio;
+            SavedModelSupportsVideo = settings.model_supports_video;
+            SavedSystemPrompt = !string.IsNullOrWhiteSpace(settings.system_prompt) ? settings.system_prompt : DefaultSystemPrompt;
+            SavedLogDir = !string.IsNullOrWhiteSpace(settings.log_dir) ? settings.log_dir : string.Empty;
             if (!string.IsNullOrWhiteSpace(SavedLogDir))
                 Logger.LogDirectory = SavedLogDir;
 
@@ -623,40 +645,12 @@ public class PetChatPlugin : MainPlugin
                 History = _historyStore.Load(SavedSystemPrompt);
 
             // 重新加载工具启用状态
-            var pluginDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? Directory.GetCurrentDirectory();
-            var settingsPath = Path.Combine(pluginDir, "plugin_settings.lps");
-            SkillManager?.LoadEnabledSkills(settingsPath);
+            SkillManager?.LoadEnabledSkills(settings);
+
+            Logger.Info($"ReloadSettings: provider={SavedProvider}, model={SavedModel}");
         }
         catch
         {
-        }
-    }
-
-    public void SaveMicrophoneDevice(string deviceId)
-    {
-        try
-        {
-            SavedMicrophoneDevice = deviceId;
-            string pluginDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? Directory.GetCurrentDirectory();
-            string settingsPath = Path.Combine(pluginDir, "plugin_settings.lps");
-
-            Dictionary<string, string> settings = LoadLps("plugin_settings.lps");
-            if (!string.IsNullOrWhiteSpace(deviceId))
-                settings["microphone_device"] = deviceId;
-            else
-                settings.Remove("microphone_device");
-
-            StringBuilder sb = new StringBuilder();
-            foreach (var kv in settings)
-            {
-                sb.Append($"{kv.Key}:|{kv.Value}\n");
-            }
-            File.WriteAllText(settingsPath, sb.ToString(), Encoding.UTF8);
-            Logger.Info($"[Microphone] 已保存麦克风设备: {deviceId}");
-        }
-        catch (Exception ex)
-        {
-            Logger.Error("保存麦克风设备失败", ex);
         }
     }
 
@@ -701,11 +695,6 @@ public class PetChatPlugin : MainPlugin
     private Dictionary<string, string> GetEndpointsLps()
     {
         return LoadLps("endpoints.lps");
-    }
-
-    private Dictionary<string, string> GetPluginSettingsLps()
-    {
-        return LoadLps("plugin_settings.lps");
     }
 
     private Dictionary<string, string> LoadLps(string fileName)

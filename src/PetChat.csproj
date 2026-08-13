@@ -61,14 +61,6 @@
     <PackageReference Include="ZXing.Net" Version="0.16.8" />
     <PackageReference Include="System.Management" Version="8.0.0" />
     <PackageReference Include="NAudio" Version="2.2.1" />
-    <PackageReference Include="Vosk" Version="0.3.38" />
   </ItemGroup>
 
-  <Target Name="CleanNativeDllsFromOutput" AfterTargets="Build">
-    <Delete Files="$(OutputPath)libvosk.dll" />
-    <Delete Files="$(OutputPath)libwinpthread-1.dll" />
-    <Delete Files="$(OutputPath)libstdc++-6.dll" />
-    <Delete Files="$(OutputPath)libgcc_s_seh-1.dll" />
-    <Message Text="已清理输出目录中的原生 DLL，仅保留 runtimes/win-x64/native/ 中的版本" Importance="high" />
-  </Target>
 </Project>

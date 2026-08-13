@@ -8,6 +8,7 @@ using System.Linq;
 using System.Management;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Reflection;
 using NAudio.CoreAudioApi;
 using System.Text;
 using System.Text.Json;
@@ -43,6 +44,10 @@ public class ToolExecutor
         = new Dictionary<string, (string, DateTime, System.Threading.Timer)>();
 
     private static readonly object _remindersLock = new object();
+
+    // PDF 中文字体缓存（BaseFont.CreateFont 解析 .ttc 较慢，全局缓存复用）
+    private static iTextSharp.text.pdf.BaseFont? _pdfChineseBaseFont;
+    private static readonly object _pdfFontLock = new object();
 
     /// <summary>
     /// 默认构造函数(无 SkillManager 引用,仅支持内置工具)。
@@ -758,6 +763,10 @@ public class ToolExecutor
     /// 清理文件路径中的非法字符（只清理文件名部分，保留目录结构）。
     /// Windows 文件名不允许: \ / : * ? " < > |
     /// </summary>
+    /// <summary>
+    /// 清理文件名非法字符，并将保存路径限制在插件目录内（防止覆盖系统/用户个人文件）。
+    /// 不在允许范围内的路径会重定向到 plugin/exports/ 目录。
+    /// </summary>
     private static string SanitizeFilePath(string path)
     {
         string? dir = Path.GetDirectoryName(path);
@@ -769,10 +778,62 @@ public class ToolExecutor
             fileName = fileName.Replace(c.ToString(), "_");
         }
 
-        if (string.IsNullOrEmpty(dir))
-            return fileName;
+        // 路径安全限制：仅允许写入插件目录内
+        string pluginDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? Directory.GetCurrentDirectory();
+        var exportsDir = Path.Combine(pluginDir, "exports");
 
-        return Path.Combine(dir, fileName);
+        if (string.IsNullOrEmpty(dir))
+        {
+            // 纯文件名（相对路径）→ 重定向到 exports，避免写入工作目录
+            Directory.CreateDirectory(exportsDir);
+            Logger.Info($"create_*: 相对路径被安全限制，重定向到 {Path.Combine(exportsDir, fileName)}（原: {path}）");
+            return Path.Combine(exportsDir, fileName);
+        }
+
+        string allowedRoot;
+        try
+        {
+            allowedRoot = Path.GetFullPath(pluginDir).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                + Path.DirectorySeparatorChar;
+        }
+        catch
+        {
+            return Path.Combine(dir, fileName);
+        }
+
+        string targetFull;
+        try
+        {
+            targetFull = Path.GetFullPath(Path.Combine(dir, fileName));
+        }
+        catch
+        {
+            return Path.Combine(dir, fileName);
+        }
+
+        if (targetFull.StartsWith(allowedRoot, StringComparison.OrdinalIgnoreCase))
+            return Path.Combine(dir, fileName);
+
+        // 不在插件目录内 → 重定向到 plugin/exports/
+        Directory.CreateDirectory(exportsDir);
+        Logger.Info($"create_*: 保存路径被安全限制，重定向到 {Path.Combine(exportsDir, fileName)}（原: {path}）");
+        return Path.Combine(exportsDir, fileName);
+    }
+
+    /// <summary>
+    /// 使用系统默认程序打开文件（静默，失败仅记录日志）。
+    /// </summary>
+    private static void OpenFileWithDefaultApp(string filePath)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath)) return;
+            Process.Start(new ProcessStartInfo(filePath) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            Logger.Error($"自动打开文件失败: {filePath}", ex);
+        }
     }
 
     /// <summary>
@@ -890,14 +951,18 @@ public class ToolExecutor
                                         {
                                             foreach (var listItem in itemsElem.EnumerateArray())
                                             {
-                                                AddPptTextShape(shapeTree, "• " + (listItem.GetString() ?? ""), 70, y, 560, 30);
+                                                AddPptTextShape(shapeTree, "• " + (listItem.GetString() ?? ""), 70, y, 560, 30, item);
                                                 y += 35;
                                             }
                                         }
                                     }
+                                    else if (itemType == "table")
+                                    {
+                                        y += AddPptTableShape(shapeTree, item, 70, y, 560);
+                                    }
                                     else
                                     {
-                                        AddPptTextShape(shapeTree, text ?? "", 70, y, 560, 100);
+                                        AddPptTextShape(shapeTree, text ?? "", 70, y, 560, 100, item);
                                         y += 110;
                                     }
                                 }
@@ -927,10 +992,14 @@ public class ToolExecutor
             if (!string.Equals(originalPath, savePath, StringComparison.Ordinal))
                 msg += $" (原路径已清理: {originalPath})";
 
+            OpenFileWithDefaultApp(savePath);
+            msg += "（已自动打开）";
+
             return new List<ContentItem> { new ContentItem { Type = "text", Text = msg } };
         }
         catch (Exception ex)
         {
+            Logger.Error("create_ppt 执行失败", ex);
             return new List<ContentItem> { new ContentItem { Type = "text", Text = $"create_ppt 执行失败: {ex.Message}" } };
         }
     }
@@ -1006,12 +1075,12 @@ public class ToolExecutor
 
             using var fs = new FileStream(savePath, FileMode.Create);
             var pdfDoc = new iTextSharp.text.Document(iTextSharp.text.PageSize.A4, 50, 50, 50, 50);
-            iTextSharp.text.pdf.PdfWriter.GetInstance(pdfDoc, fs);
+            var writer = iTextSharp.text.pdf.PdfWriter.GetInstance(pdfDoc, fs);
+            writer.PageEvent = new PdfPageNumberEvent(title ?? "");
             pdfDoc.Open();
 
-            var titleFont = iTextSharp.text.FontFactory.GetFont("SimSun", 24, iTextSharp.text.Font.BOLD);
-            var headingFont = iTextSharp.text.FontFactory.GetFont("SimSun", 16, iTextSharp.text.Font.BOLD);
-            var normalFont = iTextSharp.text.FontFactory.GetFont("SimSun", 12, iTextSharp.text.Font.NORMAL);
+            var titleFont = GetChineseFont(24, iTextSharp.text.Font.BOLD);
+            var normalFont = GetChineseFont(12, iTextSharp.text.Font.NORMAL);
 
             pdfDoc.Add(new iTextSharp.text.Paragraph(title, titleFont));
             pdfDoc.Add(new iTextSharp.text.Paragraph("\n"));
@@ -1025,15 +1094,17 @@ public class ToolExecutor
 
                     if (itemType == "title")
                     {
-                        pdfDoc.Add(new iTextSharp.text.Paragraph(text ?? "", headingFont));
+                        var (f, a) = ParsePdfItemStyle(item, 16, iTextSharp.text.Font.BOLD);
+                        pdfDoc.Add(new iTextSharp.text.Paragraph(text ?? "", f) { Alignment = a });
                     }
                     else if (itemType == "list")
                     {
                         if (item.TryGetProperty("items", out var itemsElem) && itemsElem.ValueKind == JsonValueKind.Array)
                         {
+                            var (f, a) = ParsePdfItemStyle(item, 12, iTextSharp.text.Font.NORMAL);
                             foreach (var listItem in itemsElem.EnumerateArray())
                             {
-                                pdfDoc.Add(new iTextSharp.text.Paragraph("• " + (listItem.GetString() ?? ""), normalFont));
+                                pdfDoc.Add(new iTextSharp.text.Paragraph("• " + (listItem.GetString() ?? ""), f) { Alignment = a });
                             }
                         }
                     }
@@ -1049,12 +1120,20 @@ public class ToolExecutor
                                 image.ScaleToFit(500, 400);
                                 pdfDoc.Add(image);
                             }
-                            catch { }
+                            catch (Exception ex)
+                            {
+                                Logger.Error($"PDF image download/embed failed: {imgUrl.GetString()}", ex);
+                            }
                         }
+                    }
+                    else if (itemType == "table")
+                    {
+                        AddPdfTable(pdfDoc, item, normalFont);
                     }
                     else
                     {
-                        pdfDoc.Add(new iTextSharp.text.Paragraph(text ?? "", normalFont));
+                        var (f, a) = ParsePdfItemStyle(item, 12, iTextSharp.text.Font.NORMAL);
+                        pdfDoc.Add(new iTextSharp.text.Paragraph(text ?? "", f) { Alignment = a });
                     }
                     pdfDoc.Add(new iTextSharp.text.Paragraph("\n"));
                 }
@@ -1066,11 +1145,262 @@ public class ToolExecutor
             if (!string.Equals(originalPath, savePath, StringComparison.Ordinal))
                 msg += $" (原路径已清理: {originalPath})";
 
+            OpenFileWithDefaultApp(savePath);
+            msg += "（已自动打开）";
+
             return new List<ContentItem> { new ContentItem { Type = "text", Text = msg } };
         }
         catch (Exception ex)
         {
+            Logger.Error("create_pdf 执行失败", ex);
             return new List<ContentItem> { new ContentItem { Type = "text", Text = $"create_pdf 执行失败: {ex.Message}" } };
+        }
+    }
+
+    /// <summary>
+    /// 向 PDF 文档添加表格。
+    /// </summary>
+    private static void AddPdfTable(iTextSharp.text.Document pdfDoc, JsonElement tableElem, iTextSharp.text.Font normalFont)
+    {
+        var headers = new List<string>();
+        var rows = new List<List<string>>();
+
+        if (tableElem.TryGetProperty("headers", out var hElem) && hElem.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var h in hElem.EnumerateArray())
+                headers.Add(h.GetString() ?? "");
+        }
+        if (tableElem.TryGetProperty("rows", out var rElem) && rElem.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var rowElem in rElem.EnumerateArray())
+            {
+                var row = new List<string>();
+                if (rowElem.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var cell in rowElem.EnumerateArray())
+                        row.Add(cell.GetString() ?? "");
+                }
+                rows.Add(row);
+            }
+        }
+
+        int colCount = headers.Count;
+        foreach (var r in rows)
+            colCount = Math.Max(colCount, r.Count);
+        if (colCount == 0) return;
+
+        var table = new iTextSharp.text.pdf.PdfPTable(colCount)
+        {
+            WidthPercentage = 100,
+            SpacingBefore = 8,
+            SpacingAfter = 8
+        };
+
+        // Header row
+        var headerFont = GetChineseFont(11, iTextSharp.text.Font.BOLD);
+        if (headers.Count > 0)
+        {
+            foreach (var h in headers)
+            {
+                var cell = new iTextSharp.text.pdf.PdfPCell(new iTextSharp.text.Phrase(h, headerFont))
+                {
+                    BackgroundColor = new iTextSharp.text.BaseColor(230, 230, 230),
+                    HorizontalAlignment = iTextSharp.text.Element.ALIGN_CENTER,
+                    Padding = 4
+                };
+                table.AddCell(cell);
+            }
+        }
+
+        // Data rows
+        bool alternate = false;
+        foreach (var rowData in rows)
+        {
+            for (int c = 0; c < colCount; c++)
+            {
+                string cellText = c < rowData.Count ? rowData[c] : "";
+                var cell = new iTextSharp.text.pdf.PdfPCell(new iTextSharp.text.Phrase(cellText, normalFont))
+                {
+                    Padding = 3,
+                    HorizontalAlignment = iTextSharp.text.Element.ALIGN_LEFT
+                };
+                if (alternate)
+                    cell.BackgroundColor = new iTextSharp.text.BaseColor(248, 248, 248);
+                table.AddCell(cell);
+            }
+            alternate = !alternate;
+        }
+
+        pdfDoc.Add(table);
+        pdfDoc.Add(new iTextSharp.text.Paragraph("\n"));
+    }
+
+    /// <summary>
+    /// 加载系统中文字体并嵌入 PDF（解决中文乱码）。
+    /// 优先级：微软雅黑 → 宋体 → 黑体 → 等线；找不到时返回 null（调用方回退到 FontFactory）。
+    /// </summary>
+    private static iTextSharp.text.pdf.BaseFont? GetChineseBaseFont()
+    {
+        if (_pdfChineseBaseFont != null) return _pdfChineseBaseFont;
+        lock (_pdfFontLock)
+        {
+            if (_pdfChineseBaseFont != null) return _pdfChineseBaseFont;
+
+            // .NET Core/.NET 5+ 默认不注册代码页编码，iTextSharp 解析 TTF 时
+            // 会因 Encoding.GetEncoding("windows-1252") 抛异常，必须先注册。
+            System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+
+            string fontsDir = Environment.GetFolderPath(Environment.SpecialFolder.Fonts);
+            if (!Directory.Exists(fontsDir))
+                fontsDir = @"C:\Windows\Fonts";
+
+            string[] candidates =
+            {
+                Path.Combine(fontsDir, "msyh.ttc"),     // 微软雅黑
+                Path.Combine(fontsDir, "msyh.ttf"),
+                Path.Combine(fontsDir, "simsun.ttc"),   // 宋体
+                Path.Combine(fontsDir, "simhei.ttf"),   // 黑体
+                Path.Combine(fontsDir, "Deng.ttf")      // 等线
+            };
+
+            foreach (var fontFile in candidates)
+            {
+                if (!File.Exists(fontFile)) continue;
+                try
+                {
+                    // .ttc 字体集合需指定索引 ",0" 取第一个字体
+                    string name = fontFile.EndsWith(".ttc", StringComparison.OrdinalIgnoreCase)
+                        ? fontFile + ",0"
+                        : fontFile;
+                    _pdfChineseBaseFont = iTextSharp.text.pdf.BaseFont.CreateFont(
+                        name, iTextSharp.text.pdf.BaseFont.IDENTITY_H, iTextSharp.text.pdf.BaseFont.EMBEDDED);
+                    Logger.Info($"PDF 中文字体已加载并嵌入: {fontFile}");
+                    return _pdfChineseBaseFont;
+                }
+                catch (Exception ex)
+                {
+                    Logger.Info($"PDF 字体加载失败 {fontFile}: {ex.Message}");
+                }
+            }
+
+            Logger.Info("未找到可用的系统中文字体，PDF 中文可能显示为乱码");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// 获取指定字号/样式的 PDF 中文字体；字体加载失败时回退到 FontFactory("SimSun")。
+    /// </summary>
+    private static iTextSharp.text.Font GetChineseFont(float size, int style)
+    {
+        var baseFont = GetChineseBaseFont();
+        if (baseFont != null)
+            return new iTextSharp.text.Font(baseFont, size, style);
+        return iTextSharp.text.FontFactory.GetFont("SimSun", size, style);
+    }
+
+    /// <summary>
+    /// 解析 PDF 内容项的样式（font_size/bold/italic/color/align），返回 (字体, 对齐方式)。
+    /// </summary>
+    private static (iTextSharp.text.Font Font, int Alignment) ParsePdfItemStyle(JsonElement item, float defaultSize, int defaultStyle)
+    {
+        float size = defaultSize;
+        int style = defaultStyle;
+        int alignment = iTextSharp.text.Element.ALIGN_LEFT;
+        iTextSharp.text.BaseColor? color = null;
+
+        if (item.TryGetProperty("font_size", out var fsElem) && fsElem.TryGetInt32(out int fs))
+            size = fs;
+        if (item.TryGetProperty("bold", out var boldElem) && boldElem.ValueKind == JsonValueKind.True)
+            style |= iTextSharp.text.Font.BOLD;
+        if (item.TryGetProperty("italic", out var italicElem) && italicElem.ValueKind == JsonValueKind.True)
+            style |= iTextSharp.text.Font.ITALIC;
+        if (item.TryGetProperty("color", out var colorElem))
+        {
+            string? hex = colorElem.GetString();
+            if (!string.IsNullOrEmpty(hex) && TryParseHexColor(hex, out var c))
+                color = c;
+        }
+        if (item.TryGetProperty("align", out var alignElem))
+        {
+            switch (alignElem.GetString())
+            {
+                case "center": alignment = iTextSharp.text.Element.ALIGN_CENTER; break;
+                case "right": alignment = iTextSharp.text.Element.ALIGN_RIGHT; break;
+                case "justify": alignment = iTextSharp.text.Element.ALIGN_JUSTIFIED; break;
+            }
+        }
+
+        var font = GetChineseFont(size, style);
+        if (color != null) font.Color = color;
+        return (font, alignment);
+    }
+
+    /// <summary>
+    /// 解析 #RRGGBB 十六进制颜色。
+    /// </summary>
+    private static bool TryParseHexColor(string hex, out iTextSharp.text.BaseColor color)
+    {
+        color = new iTextSharp.text.BaseColor(0, 0, 0);
+        try
+        {
+            hex = hex.TrimStart('#');
+            if (hex.Length == 6)
+            {
+                int r = Convert.ToInt32(hex.Substring(0, 2), 16);
+                int g = Convert.ToInt32(hex.Substring(2, 2), 16);
+                int b = Convert.ToInt32(hex.Substring(4, 2), 16);
+                color = new iTextSharp.text.BaseColor(r, g, b);
+                return true;
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    /// <summary>
+    /// PDF 页眉/页脚/页码事件：每页顶部显示文档标题 + 分隔线，底部居中显示页码。
+    /// </summary>
+    private class PdfPageNumberEvent : iTextSharp.text.pdf.PdfPageEventHelper
+    {
+        private readonly string _headerText;
+        private readonly iTextSharp.text.pdf.BaseFont? _baseFont;
+
+        public PdfPageNumberEvent(string headerText)
+        {
+            _headerText = headerText;
+            _baseFont = GetChineseBaseFont();
+        }
+
+        public override void OnEndPage(iTextSharp.text.pdf.PdfWriter writer, iTextSharp.text.Document document)
+        {
+            if (_baseFont == null) return;
+            var cb = writer.DirectContent;
+            float pageWidth = document.PageSize.Width;
+
+            // 页眉：分隔线 + 文档标题
+            cb.SetRGBColorFill(160, 160, 160);
+            cb.SetLineWidth(0.5f);
+            cb.MoveTo(document.LeftMargin, document.PageSize.Height - document.TopMargin + 12);
+            cb.LineTo(pageWidth - document.RightMargin, document.PageSize.Height - document.TopMargin + 12);
+            cb.Stroke();
+
+            cb.BeginText();
+            cb.SetFontAndSize(_baseFont, 9);
+            cb.SetRGBColorFill(120, 120, 120);
+            cb.ShowTextAligned(iTextSharp.text.Element.ALIGN_LEFT,
+                _headerText,
+                document.LeftMargin, document.PageSize.Height - document.TopMargin + 4, 0);
+            cb.EndText();
+
+            // 页脚：页码
+            cb.BeginText();
+            cb.SetFontAndSize(_baseFont, 9);
+            cb.SetRGBColorFill(128, 128, 128);
+            cb.ShowTextAligned(iTextSharp.text.Element.ALIGN_CENTER,
+                $"第 {writer.PageNumber} 页",
+                (document.LeftMargin + pageWidth - document.RightMargin) / 2f, 28, 0);
+            cb.EndText();
         }
     }
 
@@ -1131,6 +1461,9 @@ public class ToolExecutor
 
             if (sheetsElem.ValueKind == JsonValueKind.Array)
             {
+                var sheets = workbookPart.Workbook.AppendChild(new SS.Sheets());
+                uint sheetId = 1;
+
                 foreach (var sheetElem in sheetsElem.EnumerateArray())
                 {
                     string? sheetName = sheetElem.TryGetProperty("name", out var sn) ? sn.GetString() : "Sheet";
@@ -1142,6 +1475,7 @@ public class ToolExecutor
                     var sheetData = worksheetPart.Worksheet.GetFirstChild<SS.SheetData>();
 
                     int rowIdx = 1;
+                    int maxColCount = 0;
 
                     if (sheetElem.TryGetProperty("headers", out var headersElem) && headersElem.ValueKind == JsonValueKind.Array)
                     {
@@ -1153,6 +1487,7 @@ public class ToolExecutor
                             row.Append(cell);
                             colIdx++;
                         }
+                        maxColCount = Math.Max(maxColCount, colIdx - 1);
                         sheetData.Append(row);
                         rowIdx++;
                     }
@@ -1167,24 +1502,41 @@ public class ToolExecutor
                             {
                                 foreach (var cellElem in rowElem.EnumerateArray())
                                 {
-                                    var cell = CreateTextCell(colIdx, rowIdx, cellElem.GetString() ?? "");
+                                    var cell = CreateCellFromJson(colIdx, rowIdx, cellElem);
                                     row.Append(cell);
                                     colIdx++;
                                 }
                             }
+                            maxColCount = Math.Max(maxColCount, colIdx - 1);
                             sheetData.Append(row);
                             rowIdx++;
                         }
                     }
 
-                    var sheets = workbookPart.Workbook.AppendChild(new SS.Sheets());
+                    // Auto-fit column widths
+                    if (maxColCount > 0)
+                    {
+                        var columns = worksheetPart.Worksheet.AppendChild(new SS.Columns());
+                        for (int i = 1; i <= maxColCount; i++)
+                        {
+                            columns.Append(new SS.Column
+                            {
+                                Min = (uint)i,
+                                Max = (uint)i,
+                                Width = 15,
+                                CustomWidth = true
+                            });
+                        }
+                    }
+
                     var sheet = new SS.Sheet
                     {
                         Id = workbookPart.GetIdOfPart(worksheetPart),
-                        SheetId = (uint)(sheets.Count() + 1),
+                        SheetId = sheetId,
                         Name = sheetName ?? "Sheet"
                     };
                     sheets.Append(sheet);
+                    sheetId++;
                 }
             }
 
@@ -1195,10 +1547,14 @@ public class ToolExecutor
             if (!string.Equals(originalPath, savePath, StringComparison.Ordinal))
                 msg += $" (原路径已清理: {originalPath})";
 
+            OpenFileWithDefaultApp(savePath);
+            msg += "（已自动打开）";
+
             return new List<ContentItem> { new ContentItem { Type = "text", Text = msg } };
         }
         catch (Exception ex)
         {
+            Logger.Error("create_excel 执行失败", ex);
             return new List<ContentItem> { new ContentItem { Type = "text", Text = $"create_excel 执行失败: {ex.Message}" } };
         }
     }
@@ -1295,6 +1651,8 @@ public class ToolExecutor
                         headingRun.AppendChild(new WP.Text(text ?? ""));
                         heading.ParagraphProperties = new WP.ParagraphProperties(
                             new WP.ParagraphStyleId { Val = "Heading1" });
+                        ApplyWordRunStyle(headingRun, item);
+                        ApplyWordParagraphAlignment(heading, item);
                     }
                     else if (itemType == "list")
                     {
@@ -1305,8 +1663,13 @@ public class ToolExecutor
                                 var para = body.AppendChild(new WP.Paragraph());
                                 var run = para.AppendChild(new WP.Run());
                                 run.AppendChild(new WP.Text("• " + (listItem.GetString() ?? "")));
+                                ApplyWordRunStyle(run, item);
                             }
                         }
+                    }
+                    else if (itemType == "table")
+                    {
+                        AddWordTable(body, item);
                     }
                     else if (itemType == "image")
                     {
@@ -1344,7 +1707,10 @@ public class ToolExecutor
                                             new A.Extents { Cx = 5000000, Cy = 3000000 }),
                                         new A.PresetGeometry { Preset = A.ShapeTypeValues.Rectangle })));
                             }
-                            catch { }
+                            catch (Exception ex)
+                            {
+                                Logger.Error($"Word image download/embed failed: {imgUrl.GetString()}", ex);
+                            }
                         }
                     }
                     else
@@ -1352,6 +1718,8 @@ public class ToolExecutor
                         var para = body.AppendChild(new WP.Paragraph());
                         var run = para.AppendChild(new WP.Run());
                         run.AppendChild(new WP.Text(text ?? ""));
+                        ApplyWordRunStyle(run, item);
+                        ApplyWordParagraphAlignment(para, item);
                     }
                 }
             }
@@ -1363,12 +1731,174 @@ public class ToolExecutor
             if (!string.Equals(originalPath, savePath, StringComparison.Ordinal))
                 msg += $" (原路径已清理: {originalPath})";
 
+            OpenFileWithDefaultApp(savePath);
+            msg += "（已自动打开）";
+
             return new List<ContentItem> { new ContentItem { Type = "text", Text = msg } };
         }
         catch (Exception ex)
         {
+            Logger.Error("create_word 执行失败", ex);
             return new List<ContentItem> { new ContentItem { Type = "text", Text = $"create_word 执行失败: {ex.Message}" } };
         }
+    }
+
+    /// <summary>
+    /// 向 Word 文档添加表格。
+    /// </summary>
+    private static void AddWordTable(WP.Body body, JsonElement tableElem)
+    {
+        var headers = new List<string>();
+        var rows = new List<List<string>>();
+
+        if (tableElem.TryGetProperty("headers", out var hElem) && hElem.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var h in hElem.EnumerateArray())
+                headers.Add(h.GetString() ?? "");
+        }
+        if (tableElem.TryGetProperty("rows", out var rElem) && rElem.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var rowElem in rElem.EnumerateArray())
+            {
+                var row = new List<string>();
+                if (rowElem.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var cell in rowElem.EnumerateArray())
+                        row.Add(cell.GetString() ?? "");
+                }
+                rows.Add(row);
+            }
+        }
+
+        int colCount = headers.Count;
+        foreach (var r in rows)
+            colCount = Math.Max(colCount, r.Count);
+        if (colCount == 0) return;
+
+        var table = body.AppendChild(new WP.Table());
+
+        // Table properties: borders + style
+        var tblPr = new WP.TableProperties(
+            new WP.TableBorders(
+                new WP.TopBorder { Val = WP.BorderValues.Single, Size = 6 },
+                new WP.BottomBorder { Val = WP.BorderValues.Single, Size = 6 },
+                new WP.LeftBorder { Val = WP.BorderValues.Single, Size = 6 },
+                new WP.RightBorder { Val = WP.BorderValues.Single, Size = 6 },
+                new WP.InsideHorizontalBorder { Val = WP.BorderValues.Single, Size = 4 },
+                new WP.InsideVerticalBorder { Val = WP.BorderValues.Single, Size = 4 }),
+            new WP.TableWidth { Width = "5000", Type = WP.TableWidthUnitValues.Pct });
+        table.Append(tblPr);
+
+        // Table grid
+        var grid = table.AppendChild(new WP.TableGrid());
+        for (int c = 0; c < colCount; c++)
+            grid.Append(new WP.GridColumn());
+
+        // Header row
+        if (headers.Count > 0)
+        {
+            var headerRow = table.AppendChild(new WP.TableRow());
+            foreach (var h in headers)
+            {
+                var tc = new WP.TableCell(
+                    new WP.TableCellProperties(
+                        new WP.Shading { Val = WP.ShadingPatternValues.Clear, Fill = "E6E6E6" }),
+                    new WP.Paragraph(
+                        new WP.ParagraphProperties(
+                            new WP.Justification { Val = WP.JustificationValues.Center }),
+                        new WP.Run(
+                            new WP.RunProperties(new WP.Bold()),
+                            new WP.Text(h))));
+                headerRow.Append(tc);
+            }
+        }
+
+        // Data rows
+        bool alternate = false;
+        foreach (var rowData in rows)
+        {
+            var tableRow = table.AppendChild(new WP.TableRow());
+            for (int c = 0; c < colCount; c++)
+            {
+                string cellText = c < rowData.Count ? rowData[c] : "";
+                var tcProps = new WP.TableCellProperties();
+                if (alternate)
+                    tcProps.Append(new WP.Shading { Val = WP.ShadingPatternValues.Clear, Fill = "F8F8F8" });
+                var tc = new WP.TableCell(
+                    tcProps,
+                    new WP.Paragraph(
+                        new WP.Run(
+                            new WP.Text(cellText))));
+                tableRow.Append(tc);
+            }
+            alternate = !alternate;
+        }
+
+        // Empty paragraph after table
+        body.AppendChild(new WP.Paragraph());
+    }
+
+    /// <summary>
+    /// 应用 Word Run 文本样式（bold/italic/font_size/color）。样式属性写在 RunProperties 中。
+    /// </summary>
+    private static void ApplyWordRunStyle(WP.Run run, JsonElement item)
+    {
+        var props = new WP.RunProperties();
+        bool hasStyle = false;
+
+        if (item.TryGetProperty("bold", out var boldElem) && boldElem.ValueKind == JsonValueKind.True)
+        {
+            props.Append(new WP.Bold());
+            hasStyle = true;
+        }
+        if (item.TryGetProperty("italic", out var italicElem) && italicElem.ValueKind == JsonValueKind.True)
+        {
+            props.Append(new WP.Italic());
+            hasStyle = true;
+        }
+        if (item.TryGetProperty("font_size", out var fsElem) && fsElem.TryGetInt32(out int fs))
+        {
+            // Word 字号单位为半点（HalfPoints）：14 号 = 28 半点
+            props.Append(new WP.FontSize { Val = (fs * 2).ToString() });
+            hasStyle = true;
+        }
+        if (item.TryGetProperty("color", out var colorElem))
+        {
+            string? hex = colorElem.GetString();
+            if (!string.IsNullOrEmpty(hex))
+            {
+                hex = hex.TrimStart('#');
+                if (hex.Length == 6)
+                {
+                    props.Append(new WP.Color { Val = hex });
+                    hasStyle = true;
+                }
+            }
+        }
+
+        if (hasStyle)
+            run.RunProperties = props;
+    }
+
+    /// <summary>
+    /// 应用 Word 段落对齐（align: left/center/right/justify）。
+    /// </summary>
+    private static void ApplyWordParagraphAlignment(WP.Paragraph para, JsonElement item)
+    {
+        if (!item.TryGetProperty("align", out var alignElem)) return;
+
+        WP.JustificationValues? val = alignElem.GetString() switch
+        {
+            "center" => WP.JustificationValues.Center,
+            "right" => WP.JustificationValues.Right,
+            "justify" => WP.JustificationValues.Both,
+            _ => null
+        };
+        if (val == null) return;
+
+        if (para.ParagraphProperties == null)
+            para.ParagraphProperties = new WP.ParagraphProperties();
+        para.ParagraphProperties.Justification = new WP.Justification { Val = val };
     }
 
     private static async Task<List<ContentItem>> ExecuteReadWordAsync(string argumentsJson)
@@ -2142,7 +2672,7 @@ public class ToolExecutor
         }
     }
 
-    private static void AddPptTextShape(ShapeTree shapeTree, string text, int x, int y, int w, int h)
+    private static void AddPptTextShape(ShapeTree shapeTree, string text, int x, int y, int w, int h, JsonElement style = default)
     {
         var shapeId = (uint)(shapeTree.Descendants<Shape>().Count() + 1);
         
@@ -2158,16 +2688,160 @@ public class ToolExecutor
                 new A.Extents { Cx = w * 9525, Cy = h * 9525 }),
             new A.PresetGeometry { Preset = A.ShapeTypeValues.Rectangle },
             new A.NoFill());
-        
+
+        // 解析样式：font_size(磅)/bold/italic/color(#RRGGBB)/align
+        int fontSize = 1800; // 18pt
+        bool hasStyle = style.ValueKind == JsonValueKind.Object;
+        bool bold = false;
+        bool italic = false;
+        string? colorHex = null;
+        A.TextAlignmentTypeValues? alignment = null;
+
+        if (hasStyle)
+        {
+            if (style.TryGetProperty("font_size", out var fsElem) && fsElem.TryGetInt32(out int fs))
+                fontSize = fs * 100;
+            if (style.TryGetProperty("bold", out var bElem) && bElem.ValueKind == JsonValueKind.True) bold = true;
+            if (style.TryGetProperty("italic", out var iElem) && iElem.ValueKind == JsonValueKind.True) italic = true;
+            if (style.TryGetProperty("color", out var cElem))
+            {
+                string? hex = cElem.GetString();
+                if (!string.IsNullOrEmpty(hex)) colorHex = hex.TrimStart('#');
+            }
+            if (style.TryGetProperty("align", out var aElem))
+            {
+                alignment = aElem.GetString() switch
+                {
+                    "center" => A.TextAlignmentTypeValues.Center,
+                    "right" => A.TextAlignmentTypeValues.Right,
+                    "justify" => A.TextAlignmentTypeValues.Justified,
+                    _ => null
+                };
+            }
+        }
+
+        var runProps = new A.RunProperties { FontSize = fontSize };
+        if (bold) runProps.Bold = true;
+        if (italic) runProps.Italic = true;
+        if (colorHex != null && colorHex.Length == 6)
+            runProps.Append(new A.SolidFill(new A.RgbColorModelHex { Val = colorHex }));
+
+        var run = new A.Run(runProps, new A.Text(text));
+        A.Paragraph paragraph;
+        if (alignment != null)
+        {
+            var pPr = new A.ParagraphProperties { Alignment = alignment };
+            paragraph = new A.Paragraph(pPr, run);
+        }
+        else
+        {
+            paragraph = new A.Paragraph(run);
+        }
+
         shape.TextBody = new TextBody(
             new A.BodyProperties { Anchor = A.TextAnchoringTypeValues.Top, Wrap = A.TextWrappingValues.Square },
             new A.ListStyle(),
-            new A.Paragraph(
-                new A.Run(
-                    new A.RunProperties { FontSize = 1800 },
-                    new A.Text(text))));
+            paragraph);
         
         shapeTree.Append(shape);
+    }
+
+    /// <summary>
+    /// 向 PPT 幻灯片添加表格。返回表格占用的高度。
+    /// </summary>
+    private static int AddPptTableShape(ShapeTree shapeTree, JsonElement tableElem, int x, int y, int w)
+    {
+        var headers = new List<string>();
+        var rows = new List<List<string>>();
+
+        if (tableElem.TryGetProperty("headers", out var hElem) && hElem.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var h in hElem.EnumerateArray())
+                headers.Add(h.GetString() ?? "");
+        }
+        if (tableElem.TryGetProperty("rows", out var rElem) && rElem.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var rowElem in rElem.EnumerateArray())
+            {
+                var row = new List<string>();
+                if (rowElem.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (var cell in rowElem.EnumerateArray())
+                        row.Add(cell.GetString() ?? "");
+                }
+                rows.Add(row);
+            }
+        }
+
+        int colCount = headers.Count;
+        foreach (var r in rows)
+            colCount = Math.Max(colCount, r.Count);
+        if (colCount == 0) return 0;
+
+        int totalRows = (headers.Count > 0 ? 1 : 0) + rows.Count;
+        int rowHeight = 300000; // EMU per row
+        int tableHeight = totalRows * rowHeight;
+        int colWidth = (w * 9525) / colCount;
+
+        var shapeId = (uint)(shapeTree.Descendants<Shape>().Count() + 1);
+        var graphicFrame = new GraphicFrame();
+        graphicFrame.NonVisualGraphicFrameProperties = new NonVisualGraphicFrameProperties(
+            new NonVisualDrawingProperties { Id = shapeId, Name = "Table" },
+            new NonVisualGraphicFrameDrawingProperties(),
+            new ApplicationNonVisualDrawingProperties());
+        graphicFrame.Transform = new Transform(
+            new A.Offset { X = x * 9525, Y = y * 9525 },
+            new A.Extents { Cx = w * 9525, Cy = tableHeight });
+
+        var table = new A.Table();
+        var tableGrid = new A.TableGrid();
+        for (int i = 0; i < colCount; i++)
+            tableGrid.Append(new A.GridColumn { Width = colWidth });
+        table.Append(tableGrid);
+
+        int rowIdx = 0;
+        if (headers.Count > 0)
+        {
+            var tr = new A.TableRow { Height = rowHeight };
+            foreach (var h in headers)
+            {
+                tr.Append(new A.TableCell(
+                    new A.TextBody(
+                        new A.BodyProperties(),
+                        new A.ListStyle(),
+                        new A.Paragraph(
+                            new A.Run(
+                                new A.RunProperties { Bold = true, FontSize = 1400 },
+                                new A.Text(h)))),
+                    new A.TableCellProperties()));
+            }
+            table.Append(tr);
+            rowIdx++;
+        }
+
+        foreach (var rowData in rows)
+        {
+            var tr = new A.TableRow { Height = rowHeight };
+            for (int c = 0; c < colCount; c++)
+            {
+                string cellText = c < rowData.Count ? rowData[c] : "";
+                tr.Append(new A.TableCell(
+                    new A.TextBody(
+                        new A.BodyProperties(),
+                        new A.ListStyle(),
+                        new A.Paragraph(
+                            new A.Run(
+                                new A.RunProperties { FontSize = 1200 },
+                                new A.Text(cellText)))),
+                    new A.TableCellProperties()));
+            }
+            table.Append(tr);
+        }
+
+        graphicFrame.Append(new A.Graphic(new A.GraphicData(table) { Uri = "http://schemas.openxmlformats.org/drawingml/2006/table" }));
+        shapeTree.Append(graphicFrame);
+
+        return (totalRows * rowHeight) / 9525 + 10;
     }
 
     private static async Task AddPptImage(SlidePart slidePart, ShapeTree shapeTree, string imageUrl, int x, int y, int w, int h)
@@ -2199,7 +2873,10 @@ public class ToolExecutor
             
             shapeTree.Append(shape);
         }
-        catch { }
+        catch (Exception ex)
+        {
+            Logger.Error($"PPT image download/embed failed: {imageUrl}", ex);
+        }
     }
 
     private static SS.Cell CreateTextCell(int column, int row, string value)
@@ -2208,6 +2885,79 @@ public class ToolExecutor
         {
             CellReference = $"{GetColumnName(column)}{row}",
             CellValue = new SS.CellValue(value),
+            DataType = SS.CellValues.String
+        };
+    }
+
+    /// <summary>
+    /// 从 JSON 元素创建单元格，支持 string / number / date / currency 类型。
+    /// </summary>
+    private static SS.Cell CreateCellFromJson(int column, int row, JsonElement cellElem)
+    {
+        string cellRef = $"{GetColumnName(column)}{row}";
+
+        // 如果是字符串值，直接当文本
+        if (cellElem.ValueKind == JsonValueKind.String)
+        {
+            return new SS.Cell
+            {
+                CellReference = cellRef,
+                CellValue = new SS.CellValue(cellElem.GetString() ?? ""),
+                DataType = SS.CellValues.String
+            };
+        }
+
+        // 如果是数字，直接当数值
+        if (cellElem.ValueKind == JsonValueKind.Number)
+        {
+            return new SS.Cell
+            {
+                CellReference = cellRef,
+                CellValue = new SS.CellValue(cellElem.GetRawText()),
+                DataType = SS.CellValues.Number
+            };
+        }
+
+        // 如果是对象，检查 type 字段
+        if (cellElem.ValueKind == JsonValueKind.Object)
+        {
+            string? cellType = cellElem.TryGetProperty("type", out var ct) ? ct.GetString() : "string";
+            string? cellValue = cellElem.TryGetProperty("value", out var cv) ? cv.GetString() : "";
+
+            return cellType switch
+            {
+                "number" => new SS.Cell
+                {
+                    CellReference = cellRef,
+                    CellValue = new SS.CellValue(cellValue ?? "0"),
+                    DataType = SS.CellValues.Number
+                },
+                "date" => new SS.Cell
+                {
+                    CellReference = cellRef,
+                    CellValue = new SS.CellValue(cellValue ?? ""),
+                    DataType = SS.CellValues.String
+                },
+                "currency" => new SS.Cell
+                {
+                    CellReference = cellRef,
+                    CellValue = new SS.CellValue(cellValue ?? "0"),
+                    DataType = SS.CellValues.Number
+                },
+                _ => new SS.Cell
+                {
+                    CellReference = cellRef,
+                    CellValue = new SS.CellValue(cellValue ?? ""),
+                    DataType = SS.CellValues.String
+                }
+            };
+        }
+
+        // 其他情况 fallback 到字符串
+        return new SS.Cell
+        {
+            CellReference = cellRef,
+            CellValue = new SS.CellValue(cellElem.GetRawText()),
             DataType = SS.CellValues.String
         };
     }

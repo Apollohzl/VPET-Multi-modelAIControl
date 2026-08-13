@@ -34,6 +34,7 @@ public class ChatBridge
     private readonly bool _supportsImageInput;
     private readonly bool _supportsAudioInput;
     private readonly bool _supportsVideoInput;
+    private readonly bool _useBearerAuth;
 
     public ChatBridge(
         string apiKey,
@@ -45,7 +46,8 @@ public class ChatBridge
         ChatHistoryStore historyStore,
         bool supportsImageInput = true,
         bool supportsAudioInput = false,
-        bool supportsVideoInput = false)
+        bool supportsVideoInput = false,
+        bool useBearerAuth = false)
     {
         _apiKey = apiKey;
         _model = model;
@@ -60,6 +62,7 @@ public class ChatBridge
         _supportsImageInput = supportsImageInput;
         _supportsAudioInput = supportsAudioInput;
         _supportsVideoInput = supportsVideoInput;
+        _useBearerAuth = useBearerAuth;
     }
 
     /// <summary>
@@ -116,14 +119,11 @@ public class ChatBridge
 
             // 发送请求并处理流
             bool hadToolCall = false;
-            string lastToolName = "";
-            string lastToolCallId = "";
-            var argumentsBuilder = new StringBuilder();
 
             try
             {
                 await foreach (var chunk in ApiClient.StreamChatAsync(
-                    _chatUrl, _apiKey, _model, history.Messages, ct, tools))
+                    _chatUrl, _apiKey, _model, history.Messages, ct, tools, _useBearerAuth))
                 {
                     switch (chunk.Type)
                     {
@@ -137,39 +137,46 @@ public class ChatBridge
 
                         case StreamChunkType.ToolCall:
                             hadToolCall = true;
-                            lastToolName = chunk.ToolName ?? "";
-                            lastToolCallId = chunk.ToolCallId ?? "";
-                            if (chunk.ToolArguments == "")  // 开始接收参数
+                            // 工具调用"开始"提示(参数为空,仅用于 UI 反馈,不执行)
+                            if (!chunk.IsToolCallComplete)
                             {
-                                argumentsBuilder.Clear();
+                                var toolHint = _skillManager.GetToolByName(chunk.ToolName ?? "");
+                                string summaryHint = toolHint?.Summary ?? chunk.ToolName ?? "工具";
+                                _dispatcher.Invoke(() =>
+                                {
+                                    CallMainSayRnd(main, $"正在调用「{summaryHint}」工具...");
+                                });
+                                break;
                             }
-                            else  // 参数接收完成
+                            // 工具调用完成:执行并写入历史(支持同一响应内并行多个)
                             {
-                                string argsJson = argumentsBuilder.Length > 0 ? argumentsBuilder.ToString() : chunk.ToolArguments ?? "{}";
+                                string callName = chunk.ToolName ?? "";
+                                string callId = chunk.ToolCallId ?? "";
+                                string argsJson = string.IsNullOrEmpty(chunk.ToolArguments) ? "{}" : chunk.ToolArguments!;
 
-                                var tool = _skillManager.GetToolByName(lastToolName);
-                                string summary = tool?.Summary ?? lastToolName;
+                                var tool = _skillManager.GetToolByName(callName);
+                                string summary = tool?.Summary ?? callName;
                                 _dispatcher.Invoke(() =>
                                 {
                                     CallMainSayRnd(main, $"正在调用「{summary}」工具...");
                                 });
 
-                                Logger.ToolCall(lastToolName, argsJson);
+                                Logger.ToolCall(callName, argsJson);
 
-                                var result = await _toolExecutor.ExecuteAsync(lastToolName, argsJson);
+                                var result = await _toolExecutor.ExecuteAsync(callName, argsJson);
 
                                 string resultTypeLog = result.Count > 0 ? result[0].Type : "empty";
                                 string resultTextLog = result.Count > 0 && result[0].Type == "text" ? result[0].Text ?? "" : $"[{result.Count} 个 content 项]";
-                                Logger.ToolResult(lastToolName, resultTypeLog, resultTextLog);
+                                Logger.ToolResult(callName, resultTypeLog, resultTextLog);
 
                                 history.AppendAssistantToolCall(new FunctionCallInfo
                                 {
                                     Type = "function",
-                                    Id = lastToolCallId,
-                                    Name = lastToolName,
+                                    Id = callId,
+                                    Name = callName,
                                     Arguments = argsJson
                                 });
-                                history.AppendTool(lastToolCallId, result);
+                                history.AppendTool(callId, result);
 
                                 _historyStore.Save(history);
                                 Logger.Info($"[Chat] 工具调用结果已保存到文件");

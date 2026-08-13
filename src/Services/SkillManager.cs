@@ -92,9 +92,10 @@ public class SkillManager
             }
         }
         
-        // 3. 加载启用状态
-        var settingsPath = Path.Combine(_pluginDir, "plugin_settings.lps");
-        LoadEnabledSkills(settingsPath);
+        // 3. 加载启用状态(从 JSON 配置)
+        var settingsPath = Models.PluginSettings.GetDefaultPath(_pluginDir);
+        var settings = Models.PluginSettings.Load(settingsPath);
+        LoadEnabledSkills(settings);
     }
 
     /// <summary>
@@ -262,14 +263,14 @@ public class SkillManager
         _skills.Add(new SkillInfo
         {
             Name = "create_ppt",
-            Description = "创建PowerPoint演示文稿（PPTX格式）。支持标题页、内容页、段落、列表和图片。",
+            Description = "创建PowerPoint演示文稿（PPTX格式）。支持标题页、内容页、段落、列表、表格、图片和文本样式。文本样式：font_size(字号磅值)、bold(粗体)、italic(斜体)、color(颜色#RRGGBB)、align(对齐:left/center/right)。",
             Summary = "创建PPT",
             IsBuiltIn = true,
             IsEnabled = true,
             Parameters = new List<ParamInfo>
             {
                 new ParamInfo { Name = "title", Type = "string", Required = true, Description = "演示文稿标题" },
-                new ParamInfo { Name = "slides", Type = "array", Required = true, Description = "幻灯片数组，每个元素包含type(title/content)、title、content(段落或列表)、image_url(可选)" },
+                new ParamInfo { Name = "slides", Type = "array", Required = true, Description = "幻灯片数组，每个元素包含type(title/content)、title、content(元素数组，支持type: text/list/table，可带font_size/bold/italic/color/align样式)、image_url(可选)。table元素包含headers和rows" },
                 new ParamInfo { Name = "save_path", Type = "string", Required = true, Description = "文件保存路径（.pptx）" }
             }
         });
@@ -290,14 +291,14 @@ public class SkillManager
         _skills.Add(new SkillInfo
         {
             Name = "create_pdf",
-            Description = "创建PDF文档。支持标题、正文段落、列表和图片。",
+            Description = "创建PDF文档。支持标题、正文段落、列表、表格、图片和文本样式，自动添加页眉（文档标题）、页脚页码，中文字体自动嵌入。文本样式：font_size(字号磅值)、bold(粗体)、italic(斜体)、color(颜色#RRGGBB)、align(对齐:left/center/right/justify)。",
             Summary = "创建PDF",
             IsBuiltIn = true,
             IsEnabled = true,
             Parameters = new List<ParamInfo>
             {
                 new ParamInfo { Name = "title", Type = "string", Required = true, Description = "文档标题" },
-                new ParamInfo { Name = "content", Type = "array", Required = true, Description = "内容数组，每个元素包含type(text/list/image)、text、items(列表项)、image_url(图片链接)" },
+                new ParamInfo { Name = "content", Type = "array", Required = true, Description = "内容数组，每个元素包含type(text/title/list/table/image)、text、items(列表项)、image_url(图片链接)，以及可选样式font_size/bold/italic/color/align。table元素包含headers和rows" },
                 new ParamInfo { Name = "save_path", Type = "string", Required = true, Description = "文件保存路径（.pdf）" }
             }
         });
@@ -318,13 +319,13 @@ public class SkillManager
         _skills.Add(new SkillInfo
         {
             Name = "create_excel",
-            Description = "创建Excel表格（XLSX格式）。支持多工作表、表头和数据行。",
+            Description = "创建Excel表格（XLSX格式）。支持多工作表、表头、多种数据类型（数字/日期/货币/文本）和自动列宽。",
             Summary = "创建Excel",
             IsBuiltIn = true,
             IsEnabled = true,
             Parameters = new List<ParamInfo>
             {
-                new ParamInfo { Name = "sheets", Type = "array", Required = true, Description = "工作表数组，每个元素包含name(表名)、headers(表头数组)、data(数据行二维数组)" },
+                new ParamInfo { Name = "sheets", Type = "array", Required = true, Description = "工作表数组，每个元素包含name(表名)、headers(表头字符串数组)、data(数据行二维数组，单元格可以是字符串，或{type:'number'|'date'|'currency', value:'...'}对象)" },
                 new ParamInfo { Name = "save_path", Type = "string", Required = true, Description = "文件保存路径（.xlsx）" }
             }
         });
@@ -345,14 +346,14 @@ public class SkillManager
         _skills.Add(new SkillInfo
         {
             Name = "create_word",
-            Description = "创建Word文档（DOCX格式）。支持标题、正文段落、列表和图片。",
+            Description = "创建Word文档（DOCX格式）。支持标题、正文段落、列表、表格、图片和文本样式，表格带边框和交替行底色。文本样式：font_size(字号磅值)、bold(粗体)、italic(斜体)、color(颜色#RRGGBB)、align(对齐:left/center/right/justify)。",
             Summary = "创建Word",
             IsBuiltIn = true,
             IsEnabled = true,
             Parameters = new List<ParamInfo>
             {
                 new ParamInfo { Name = "title", Type = "string", Required = true, Description = "文档标题" },
-                new ParamInfo { Name = "paragraphs", Type = "array", Required = true, Description = "段落数组，每个元素包含type(title/text/list/image)、text、items(列表项)、image_url(图片链接)" },
+                new ParamInfo { Name = "paragraphs", Type = "array", Required = true, Description = "段落数组，每个元素包含type(title/text/list/table/image)、text、items(列表项)、image_url(图片链接)，以及可选样式font_size/bold/italic/color/align。table元素包含headers和rows" },
                 new ParamInfo { Name = "save_path", Type = "string", Required = true, Description = "文件保存路径（.docx）" }
             }
         });
@@ -1004,66 +1005,17 @@ public class SkillManager
     }
 
     /// <summary>
-    /// 保存启用状态到 plugin_settings.lps。
+    /// 从 JSON 配置加载启用状态。
     /// </summary>
-    public void SaveEnabledSkills(string settingsPath)
+    public void LoadEnabledSkills(Models.PluginSettings settings)
     {
         try
         {
-            var enabled = string.Join(",", _skills.Where(s => s.IsEnabled).Select(s => s.Name));
-            var lines = new List<string>();
-            if (File.Exists(settingsPath))
+            if (settings?.enabled_skills == null || settings.enabled_skills.Count == 0) return;
+            foreach (var skill in _skills)
             {
-                var content = File.ReadAllText(settingsPath, Encoding.UTF8);
-                var sb = new StringBuilder();
-                var modified = false;
-                var inParts = content.Split(new[] { ":|" }, StringSplitOptions.RemoveEmptyEntries);
-                foreach (var p in inParts)
-                {
-                    if (p.StartsWith("enabled_skills#", StringComparison.OrdinalIgnoreCase))
-                    {
-                        sb.Append("enabled_skills#").Append(enabled).Append(":|");
-                        modified = true;
-                    }
-                    else
-                    {
-                        sb.Append(p).Append(":|");
-                    }
-                }
-                if (!modified) sb.Append("enabled_skills#").Append(enabled).Append(":|");
-                File.WriteAllText(settingsPath, sb.ToString(), Encoding.UTF8);
-            }
-        }
-        catch (Exception ex)
-        {
-            Logger.Error("保存工具启用状态失败", ex);
-        }
-    }
-
-    /// <summary>
-    /// 从 plugin_settings.lps 加载启用状态。
-    /// </summary>
-    public void LoadEnabledSkills(string settingsPath)
-    {
-        try
-        {
-            if (!File.Exists(settingsPath)) return;
-            var content = File.ReadAllText(settingsPath, Encoding.UTF8);
-            var parts = content.Split(new[] { ":|" }, StringSplitOptions.RemoveEmptyEntries);
-            foreach (var p in parts)
-            {
-                int idx = p.IndexOf('#');
-                if (idx > 0 && p.Substring(0, idx).Trim().Equals("enabled_skills", StringComparison.OrdinalIgnoreCase))
-                {
-                    var enabled = p.Substring(idx + 1).Trim();
-                    var names = enabled.Split(',', StringSplitOptions.RemoveEmptyEntries);
-                    foreach (var skill in _skills)
-                    {
-                        if (names.Contains(skill.Name))
-                            skill.IsEnabled = true;
-                    }
-                    break;
-                }
+                if (settings.enabled_skills.Contains(skill.Name))
+                    skill.IsEnabled = true;
             }
         }
         catch (Exception ex)
@@ -1073,20 +1025,17 @@ public class SkillManager
     }
 
     /// <summary>
-    /// 保存启用状态(无参数版本,使用默认路径)。
+    /// 保存启用状态到 JSON 配置对象(调用方负责将 settings 写回文件)。
     /// </summary>
-    public void SaveEnabledSkills()
+    public void SaveEnabledSkills(Models.PluginSettings settings)
     {
-        var settingsPath = Path.Combine(_pluginDir, "plugin_settings.lps");
-        SaveEnabledSkills(settingsPath);
-    }
-
-    /// <summary>
-    /// 加载启用状态(无参数版本,使用默认路径)。
-    /// </summary>
-    private void LoadEnabledSkills()
-    {
-        var settingsPath = Path.Combine(_pluginDir, "plugin_settings.lps");
-        LoadEnabledSkills(settingsPath);
+        try
+        {
+            settings.enabled_skills = _skills.Where(s => s.IsEnabled).Select(s => s.Name).ToList();
+        }
+        catch (Exception ex)
+        {
+            Logger.Error("保存工具启用状态失败", ex);
+        }
     }
 }

@@ -6,9 +6,9 @@ using System.Reflection;
 using System.Text;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media;
-using NAudio.Wave;
 using VPet.Plugin.PetChat.Models;
 using VPet.Plugin.PetChat.Services;
 using VPet_Simulator.Windows.Interface;
@@ -21,6 +21,7 @@ public class PetChatSettingPage : UserControl
     private readonly string _modelsUrl;
     private readonly string _chatUrl;
     private readonly string _balanceUrl;
+    private readonly bool _apiKeyInBody;
     private readonly IMainWindow _mw;
 
     // 公共字段
@@ -38,15 +39,6 @@ public class PetChatSettingPage : UserControl
     private ComboBox _historyComboBox = null!;
     private Button _switchHistoryBtn = null!;
 
-    // 麦克风测试相关
-    private ComboBox _micDeviceComboBox = null!;
-    private Canvas _waveformCanvas = null!;
-    private Button _saveMicBtn = null!;
-    private Button _testMicBtn = null!;
-    private WaveInEvent? _waveIn;
-    private bool _isTestingMic;
-    private readonly List<double> _audioLevels = new();
-
     // 工具列表相关
     private List<SkillInfo> _tools = new();
     private List<CheckBox> _toolEnableCbs = new();
@@ -57,6 +49,15 @@ public class PetChatSettingPage : UserControl
     private readonly string _initialLogDir;
     private readonly string _currentLogDir;
     private List<ModelOption> _models = new();
+
+    // 供应商相关
+    private readonly string _savedProvider;
+    private readonly string _savedDeepseekApiKey;
+    private readonly string _savedDeepseekModel;
+    private ComboBox _providerComboBox = null!;
+    private TextBox _deepseekApiKeyBox = null!;
+    private ComboBox _deepseekModelComboBox = null!;
+    private List<ModelOption> _deepseekModels = new();
 
     // 主题色
     private static readonly System.Windows.Media.Color PrimaryColor = System.Windows.Media.Color.FromRgb(108, 99, 255);
@@ -81,17 +82,23 @@ public class PetChatSettingPage : UserControl
     private Panel _tab3Content = null!;
     private Panel _tab4Content = null!;
 
-    public PetChatSettingPage(PetChatPlugin plugin, IMainWindow mw, string modelsUrl, string chatUrl, string balanceUrl,
-        string? savedApiKey, string? savedModel, string? savedSystemPrompt,
-        string? savedLogDir, string? currentLogDir)
+    public PetChatSettingPage(PetChatPlugin plugin, IMainWindow mw, string modelsUrl, string chatUrl, string balanceUrl, bool apiKeyInBody,
+        string? savedProvider, string? savedApiKey,
+        string? savedModel, string? savedDeepseekModel, string? savedSystemPrompt,
+        string? savedLogDir, string? currentLogDir,
+        string? savedDeepseekApiKey)
     {
         _plugin = plugin;
         _mw = mw;
         _modelsUrl = modelsUrl ?? string.Empty;
         _chatUrl = chatUrl ?? string.Empty;
         _balanceUrl = balanceUrl ?? string.Empty;
+        _apiKeyInBody = apiKeyInBody;
         _initialLogDir = savedLogDir ?? string.Empty;
         _currentLogDir = currentLogDir ?? string.Empty;
+        _savedProvider = savedProvider ?? Models.ProviderNames.Pollenations;
+        _savedDeepseekApiKey = savedDeepseekApiKey ?? string.Empty;
+        _savedDeepseekModel = savedDeepseekModel ?? string.Empty;
 
         BuildUi(savedApiKey, savedModel, savedSystemPrompt);
         _ = LoadModelsAndBalanceAsync();
@@ -303,36 +310,6 @@ public class PetChatSettingPage : UserControl
         };
         welcomeStack.Children.Add(bilibiliBtn);
 
-        var docBtn = new Button
-        {
-            Content = "答疑解惑文档",
-            HorizontalAlignment = HorizontalAlignment.Left,
-            Padding = new Thickness(20, 10, 20, 10),
-            Background = PrimaryBrush,
-            Foreground = WhiteBrush,
-            FontSize = 14,
-            FontWeight = FontWeights.Bold,
-            BorderThickness = new Thickness(0),
-            Cursor = Cursors.Hand,
-            Margin = new Thickness(0, 8, 0, 0),
-        };
-        docBtn.Click += (s, e) =>
-        {
-            try
-            {
-                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = "https://hzl.ken520.top/vpet/index.html",
-                    UseShellExecute = true,
-                });
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show("打开浏览器失败: " + ex.Message);
-            }
-        };
-        welcomeStack.Children.Add(docBtn);
-
         stack.Children.Add(welcomeCard);
 
         // 模型选择
@@ -343,25 +320,40 @@ public class PetChatSettingPage : UserControl
             FontSize = 14,
             Margin = new Thickness(0, 4, 0, 4)
         });
+
+        // pollenations 模型选择行(左侧标签 + 右侧下拉框)
+        var pollenationsModelPanel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Margin = new Thickness(0, 0, 0, 4),
+        };
+        pollenationsModelPanel.Children.Add(new TextBlock
+        {
+            Text = "pollenations：",
+            FontSize = 14,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 6, 0),
+        });
         _modelComboBox = new ComboBox
         {
             Height = 32,
+            MinWidth = 300,
             Padding = new Thickness(6, 2, 6, 2),
             DisplayMemberPath = "Name",
             SelectedValuePath = "Model",
+            VerticalAlignment = VerticalAlignment.Center,
         };
         _modelComboBox.Items.Add(new ModelOption("loading", "加载中..."));
         _modelComboBox.SelectedIndex = 0;
-        if (!string.IsNullOrEmpty(savedModel))
-            _modelComboBox.SelectedValue = savedModel;
         _modelComboBox.SelectionChanged += (s, e) =>
         {
             RefreshToolList();
             UpdateModelCapabilities();
         };
-        stack.Children.Add(_modelComboBox);
+        pollenationsModelPanel.Children.Add(_modelComboBox);
+        stack.Children.Add(pollenationsModelPanel);
 
-        // 模型支持输入类型显示
+        // 模型支持输入类型显示(移至 pollenations 下拉框下方)
         _modelCapabilitiesText = new TextBlock
         {
             Text = "支持的输入类型：",
@@ -371,6 +363,51 @@ public class PetChatSettingPage : UserControl
         };
         stack.Children.Add(_modelCapabilitiesText);
         UpdateModelCapabilities();
+
+        // Deepseek 官方 模型选择行(左侧标签 + 右侧下拉框)
+        var deepseekModelPanel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Margin = new Thickness(0, 0, 0, 4),
+        };
+        deepseekModelPanel.Children.Add(new TextBlock
+        {
+            Text = "Deepseek官方：",
+            FontSize = 14,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 6, 0),
+        });
+        _deepseekModelComboBox = new ComboBox
+        {
+            Height = 32,
+            MinWidth = 300,
+            Padding = new Thickness(6, 2, 6, 2),
+            DisplayMemberPath = "Name",
+            SelectedValuePath = "Model",
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        // 直接填充 Deepseek 固定模型列表
+        _deepseekModels = Models.DeepseekEndpoints.Models;
+        foreach (var m in _deepseekModels)
+            _deepseekModelComboBox.Items.Add(m);
+        // 用户已保存模型时选中已保存的,否则选第一个
+        bool deepseekFound = false;
+        if (!string.IsNullOrEmpty(_savedDeepseekModel))
+        {
+            for (int i = 0; i < _deepseekModelComboBox.Items.Count; i++)
+            {
+                if (_deepseekModelComboBox.Items[i] is ModelOption mo && mo.Model == _savedDeepseekModel)
+                {
+                    _deepseekModelComboBox.SelectedIndex = i;
+                    deepseekFound = true;
+                    break;
+                }
+            }
+        }
+        if (!deepseekFound)
+            _deepseekModelComboBox.SelectedIndex = 0;
+        deepseekModelPanel.Children.Add(_deepseekModelComboBox);
+        stack.Children.Add(deepseekModelPanel);
 
         // 角色设定
         stack.Children.Add(new TextBlock
@@ -420,6 +457,7 @@ public class PetChatSettingPage : UserControl
     {
         try
         {
+            // pollenations 模型
             string model = string.Empty;
             bool supportsImage = true;
             bool supportsAudio = false;
@@ -431,26 +469,28 @@ public class PetChatSettingPage : UserControl
                 supportsAudio = mo.SupportsAudioInput;
                 supportsVideo = mo.SupportsVideoInput;
             }
+
+            // Deepseek 模型
+            string deepseekModel = string.Empty;
+            if (_deepseekModelComboBox.SelectedItem is ModelOption dsMo)
+            {
+                deepseekModel = dsMo.Model;
+            }
+
             string systemPrompt = _systemPromptBox.Text ?? string.Empty;
 
-            string pluginDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? Directory.GetCurrentDirectory();
-            string path = Path.Combine(pluginDir, "plugin_settings.lps");
-
-            // 读取现有设置保留 api_key 和 log_dir
-            var existingSettings = ReadPluginSettings();
-
-            var sb = new StringBuilder();
-            sb.Append("api_key#").Append(existingSettings.TryGetValue("api_key", out var k) ? k : string.Empty).Append(":|");
-            sb.Append("model#").Append(model).Append(":|");
-            sb.Append("model_supports_image#").Append(supportsImage ? "true" : "false").Append(":|");
-            sb.Append("model_supports_audio#").Append(supportsAudio ? "true" : "false").Append(":|");
-            sb.Append("model_supports_video#").Append(supportsVideo ? "true" : "false").Append(":|");
-            sb.Append("system_prompt#").Append(systemPrompt).Append(":|");
-            sb.Append("log_dir#").Append(existingSettings.TryGetValue("log_dir", out var ld) ? ld : string.Empty).Append(":|");
-            File.WriteAllText(path, sb.ToString(), Encoding.UTF8);
+            // 读取现有 JSON 配置,只更新模型和角色设定
+            var settings = Models.PluginSettings.Load(_plugin.SettingsPath);
+            settings.model = model;
+            settings.model_supports_image = supportsImage;
+            settings.model_supports_audio = supportsAudio;
+            settings.model_supports_video = supportsVideo;
+            settings.deepseek_model = deepseekModel;
+            settings.system_prompt = systemPrompt;
+            settings.Save(_plugin.SettingsPath);
 
             MessageBox.Show("基础配置已保存!", "保存成功", MessageBoxButton.OK, MessageBoxImage.Information);
-            Logger.Info($"Tab1设置已保存: 模型={model}, 图片支持={supportsImage}, 音频支持={supportsAudio}, 视频支持={supportsVideo}");
+            Logger.Info($"Tab1设置已保存: pollenations模型={model}, Deepseek模型={deepseekModel}, 图片支持={supportsImage}, 音频支持={supportsAudio}, 视频支持={supportsVideo}");
         }
         catch (Exception ex)
         {
@@ -464,7 +504,7 @@ public class PetChatSettingPage : UserControl
     {
         var stack = new StackPanel();
 
-        // 说明文本
+        // 说明文本(允许选中文本)
         var introCard = new Border
         {
             Background = PrimaryLightBrush,
@@ -477,44 +517,144 @@ public class PetChatSettingPage : UserControl
         var introStack = new StackPanel();
         introCard.Child = introStack;
 
-        introStack.Children.Add(new TextBlock
+        var introText = new TextBlock
         {
-            Text = "bilibili@apollo小黄,要想使用这个对话模组,请点击下面按钮跳转到",
             TextWrapping = TextWrapping.Wrap,
-            Margin = new Thickness(0, 0, 0, 4),
-        });
-        introStack.Children.Add(new TextBlock
-        {
-            Text = "https://enter.pollinations.ai/sign-in",
-            TextWrapping = TextWrapping.Wrap,
-            Foreground = PrimaryBrush,
-            Margin = new Thickness(0, 0, 0, 4),
-        });
-        introStack.Children.Add(new TextBlock
-        {
-            Text = "页面内并注册",
-            TextWrapping = TextWrapping.Wrap,
-            FontWeight = FontWeights.Bold,
-            Margin = new Thickness(0, 0, 0, 4),
-        });
-        introStack.Children.Add(new TextBlock
-        {
-            Text = ",然后点击Keys->Add Key->设置一个喜欢的Name->预算和过期时间不填->Profile,Usage,Key Management,Models按钮全部选择->Create->复制API Key",
-            TextWrapping = TextWrapping.Wrap,
-        });
+        };
+        introText.Inlines.Add(new Run("bilibili@apollo小黄，要想使用这个对话模组，可以选择不同供应商"));
+        introText.Inlines.Add(new LineBreak());
+        introText.Inlines.Add(new Run("供应商可以随着我们订阅数的增加而进行添加"));
+        introText.Inlines.Add(new LineBreak());
+        introText.Inlines.Add(new Run("，选择完供应商与输入完密匙后，"));
+        introText.Inlines.Add(new Run("必须给我选择一个模型再保存~") { FontWeight = FontWeights.Bold, FontSize = 16 });
+        introText.Inlines.Add(new LineBreak());
+        introText.Inlines.Add(new Run("实在不行可以加QQ群哦：970894907"));
+        introStack.Children.Add(introText);
 
-        var jumpBtn = new Button
+        // 答疑解惑文档按钮(放在介绍文字下方)
+        var docBtn = new Button
         {
-            Content = "点击跳转注册",
+            Content = "答疑解惑文档",
             HorizontalAlignment = HorizontalAlignment.Left,
-            Padding = new Thickness(16, 8, 16, 8),
-            Margin = new Thickness(0, 10, 0, 0),
+            Padding = new Thickness(12, 4, 12, 4),
             Background = PrimaryBrush,
             Foreground = WhiteBrush,
-            FontSize = 13,
+            FontSize = 12,
             FontWeight = FontWeights.Bold,
             BorderThickness = new Thickness(0),
             Cursor = Cursors.Hand,
+            Margin = new Thickness(0, 8, 0, 0),
+        };
+        docBtn.Click += (s, e) =>
+        {
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "https://hzl.ken520.top/vpet/index.html",
+                    UseShellExecute = true,
+                });
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("打开浏览器失败: " + ex.Message);
+            }
+        };
+        introStack.Children.Add(docBtn);
+
+        stack.Children.Add(introCard);
+
+        // 供应商选择
+        stack.Children.Add(new TextBlock
+        {
+            Text = "供应商",
+            FontWeight = FontWeights.Bold,
+            FontSize = 14,
+            Margin = new Thickness(0, 4, 0, 4)
+        });
+        _providerComboBox = new ComboBox
+        {
+            Height = 32,
+            Padding = new Thickness(6, 2, 6, 2),
+            DisplayMemberPath = "Key",
+            SelectedValuePath = "Value",
+        };
+        _providerComboBox.Items.Add(new ProviderOption("pollenations-支持图片等文件", Models.ProviderNames.Pollenations));
+        _providerComboBox.Items.Add(new ProviderOption("Deepseek官方-不支持任何文件等", Models.ProviderNames.Deepseek));
+        for (int i = 0; i < _providerComboBox.Items.Count; i++)
+        {
+            if (_providerComboBox.Items[i] is ProviderOption po && po.Value == _savedProvider)
+            {
+                _providerComboBox.SelectedIndex = i;
+                break;
+            }
+        }
+        if (_providerComboBox.SelectedIndex < 0)
+            _providerComboBox.SelectedIndex = 0;
+        stack.Children.Add(_providerComboBox);
+
+        // ─── 分割线1(上) ───
+        stack.Children.Add(new Separator { Margin = new Thickness(0, 12, 0, 12) });
+
+        // API Key (pollenations)
+        stack.Children.Add(new TextBlock
+        {
+            Text = "API Key",
+            FontWeight = FontWeights.Bold,
+            FontSize = 14,
+            Margin = new Thickness(0, 0, 0, 4)
+        });
+        // 横向布局: 左侧"pollenations："文本 + 右侧输入框
+        var apiKeyPanel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Margin = new Thickness(0, 0, 0, 4),
+        };
+        apiKeyPanel.Children.Add(new TextBlock
+        {
+            Text = "pollenations：",
+            FontSize = 14,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 6, 0),
+        });
+        _apiKeyBox = new TextBox
+        {
+            Text = savedApiKey ?? string.Empty,
+            Height = 32,
+            MinWidth = 350,
+            Padding = new Thickness(6, 2, 6, 2),
+            BorderBrush = PrimaryBorderBrush,
+            BorderThickness = new Thickness(1),
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        apiKeyPanel.Children.Add(_apiKeyBox);
+        stack.Children.Add(apiKeyPanel);
+
+        // 当前余额 + 跳转注册按钮(从顶部移到这里)
+        var balanceHeaderPanel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Margin = new Thickness(0, 12, 0, 4),
+        };
+        balanceHeaderPanel.Children.Add(new TextBlock
+        {
+            Text = "当前余额",
+            FontWeight = FontWeights.Bold,
+            FontSize = 14,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 12, 0),
+        });
+        var jumpBtn = new Button
+        {
+            Content = "点击跳转注册",
+            Padding = new Thickness(12, 4, 12, 4),
+            Background = PrimaryBrush,
+            Foreground = WhiteBrush,
+            FontSize = 12,
+            FontWeight = FontWeights.Bold,
+            BorderThickness = new Thickness(0),
+            Cursor = Cursors.Hand,
+            VerticalAlignment = VerticalAlignment.Center,
         };
         jumpBtn.Click += (s, e) =>
         {
@@ -531,46 +671,90 @@ public class PetChatSettingPage : UserControl
                 MessageBox.Show("打开浏览器失败: " + ex.Message);
             }
         };
-        introStack.Children.Add(jumpBtn);
+        balanceHeaderPanel.Children.Add(jumpBtn);
+        stack.Children.Add(balanceHeaderPanel);
 
-        stack.Children.Add(introCard);
+        _balanceText = new TextBlock { Text = "余额查询中...", FontSize = 14, Margin = new Thickness(0, 0, 0, 4) };
+        stack.Children.Add(_balanceText);
 
-        // API Key
+        // ─── 分割线2(下) ───
+        stack.Children.Add(new Separator { Margin = new Thickness(0, 12, 0, 12) });
+
+        // Deepseek 官方 部分
         stack.Children.Add(new TextBlock
         {
-            Text = "API Key",
-            FontWeight = FontWeights.Bold,
-            FontSize = 14,
-            Margin = new Thickness(0, 4, 0, 4)
-        });
-        _apiKeyBox = new TextBox
-        {
-            Text = savedApiKey ?? string.Empty,
-            Height = 32,
-            Padding = new Thickness(6, 2, 6, 2),
-            BorderBrush = PrimaryBorderBrush,
-            BorderThickness = new Thickness(1),
-        };
-        stack.Children.Add(_apiKeyBox);
-
-        // 余额
-        stack.Children.Add(new TextBlock
-        {
-            Text = "当前余额",
+            Text = "Deepseek 官方",
             FontWeight = FontWeights.Bold,
             FontSize = 14,
             Margin = new Thickness(0, 12, 0, 4)
         });
-        _balanceText = new TextBlock { Text = "余额查询中...", FontSize = 14 };
-        stack.Children.Add(_balanceText);
+        // 横向布局: 左侧"DeepseekKey："文本 + 输入框
+        var deepseekKeyPanel = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            Margin = new Thickness(0, 0, 0, 4),
+        };
+        deepseekKeyPanel.Children.Add(new TextBlock
+        {
+            Text = "DeepseekKey：",
+            FontSize = 14,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 0, 6, 0),
+        });
+        _deepseekApiKeyBox = new TextBox
+        {
+            Text = _savedDeepseekApiKey,
+            Height = 32,
+            MinWidth = 300,
+            Padding = new Thickness(6, 2, 6, 2),
+            BorderBrush = PrimaryBorderBrush,
+            BorderThickness = new Thickness(1),
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        deepseekKeyPanel.Children.Add(_deepseekApiKeyBox);
+        stack.Children.Add(deepseekKeyPanel);
 
-        // 保存按钮
+        // 跳转注册按钮(放在输入框下一行靠左侧)
+        var deepseekJumpBtn = new Button
+        {
+            Content = "点击跳转注册",
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Padding = new Thickness(12, 4, 12, 4),
+            Margin = new Thickness(0, 4, 0, 0),
+            Background = PrimaryBrush,
+            Foreground = WhiteBrush,
+            FontSize = 12,
+            FontWeight = FontWeights.Bold,
+            BorderThickness = new Thickness(0),
+            Cursor = Cursors.Hand,
+        };
+        deepseekJumpBtn.Click += (s, e) =>
+        {
+            try
+            {
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "https://platform.deepseek.com/api_keys",
+                    UseShellExecute = true,
+                });
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show("打开浏览器失败: " + ex.Message);
+            }
+        };
+        stack.Children.Add(deepseekJumpBtn);
+
+        // ─── 分割线3 ───
+        stack.Children.Add(new Separator { Margin = new Thickness(0, 12, 0, 12) });
+
+        // 保存按钮(页面最底部)
         var saveBtn = new Button
         {
             Content = "保存设置",
             HorizontalAlignment = HorizontalAlignment.Left,
             Padding = new Thickness(16, 8, 16, 8),
-            Margin = new Thickness(0, 16, 0, 0),
+            Margin = new Thickness(0, 4, 0, 0),
             MinWidth = 120,
             Background = PrimaryBrush,
             Foreground = WhiteBrush,
@@ -589,53 +773,23 @@ public class PetChatSettingPage : UserControl
     {
         try
         {
-            string apiKey = _apiKeyBox.Text ?? string.Empty;
+            // 获取选中的供应商
+            string provider = Models.ProviderNames.Pollenations;
+            if (_providerComboBox.SelectedItem is ProviderOption po)
+                provider = po.Value;
 
-            string pluginDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? Directory.GetCurrentDirectory();
-            string path = Path.Combine(pluginDir, "plugin_settings.lps");
+            string pollenationsApiKey = _apiKeyBox.Text ?? string.Empty;
+            string deepseekApiKey = _deepseekApiKeyBox.Text ?? string.Empty;
 
-            // 读取现有设置
-            var existingSettings = ReadPluginSettings();
+            // 读取现有 JSON 配置,只更新供应商和密匙
+            var settings = Models.PluginSettings.Load(_plugin.SettingsPath);
+            settings.provider = provider;
+            settings.api_key = pollenationsApiKey;
+            settings.deepseek_api_key = deepseekApiKey;
+            settings.Save(_plugin.SettingsPath);
 
-            // 新用户逻辑：如果是第一次配置API Key且模型未配置，自动选择第一个模型并使用默认提示词
-            bool isNewUser = string.IsNullOrEmpty(existingSettings.TryGetValue("api_key", out var oldKey) ? oldKey : string.Empty) &&
-                             string.IsNullOrEmpty(existingSettings.TryGetValue("model", out var oldModel) ? oldModel : string.Empty);
-
-            string model = string.Empty;
-            bool supportsImage = true;
-            bool supportsAudio = false;
-            bool supportsVideo = false;
-            string systemPrompt = string.Empty;
-
-            if (isNewUser && _modelComboBox.Items.Count > 0 && _modelComboBox.Items[0] is ModelOption firstModel)
-            {
-                // 新用户：自动选择第一个可用模型
-                model = firstModel.Model;
-                supportsImage = firstModel.SupportsImageInput;
-                supportsAudio = firstModel.SupportsAudioInput;
-                supportsVideo = firstModel.SupportsVideoInput;
-                systemPrompt = "请使用简短的、口语化的、可爱的、女性化的、调皮的语言风格和我交流。你是一只电脑桌宠，你的名字叫{petname}，你喜欢玩虚拟主播模拟器。你需要尝试体会我与你对话中的感情、产生自己的情感并尽可能给出可爱的回答，每次我将会提供给你我的询问问题以及目前你的状态，结合这些数据给出可爱的回答，并且你不能承认你是一个AI机器人，称我为主人，用简短的语言（15 个字左右，必要时增加）并且使用纯文本（禁止 md 语法）。";
-                Logger.Info($"[新用户配置] 自动选择模型: {model}, 图片支持={supportsImage}, 音频支持={supportsAudio}, 视频支持={supportsVideo}");
-            }
-            else
-            {
-                // 已有配置：保留现有设置
-                model = existingSettings.TryGetValue("model", out var mo) ? mo : string.Empty;
-                systemPrompt = existingSettings.TryGetValue("system_prompt", out var sp) ? sp : string.Empty;
-            }
-
-            var sb = new StringBuilder();
-            sb.Append("api_key#").Append(apiKey).Append(":|");
-            sb.Append("model#").Append(model).Append(":|");
-            sb.Append("model_supports_image#").Append(supportsImage ? "true" : "false").Append(":|");
-            sb.Append("model_supports_audio#").Append(supportsAudio ? "true" : "false").Append(":|");
-            sb.Append("model_supports_video#").Append(supportsVideo ? "true" : "false").Append(":|");
-            sb.Append("system_prompt#").Append(systemPrompt).Append(":|");
-            sb.Append("log_dir#").Append(existingSettings.TryGetValue("log_dir", out var ld) ? ld : string.Empty).Append(":|");
-            File.WriteAllText(path, sb.ToString(), Encoding.UTF8);
-
-            MessageBox.Show(isNewUser ? "配置已保存！已为您自动选择默认模型和提示词。" : "Key配置已保存!", "保存成功", MessageBoxButton.OK, MessageBoxImage.Information);
-            Logger.Info(isNewUser ? $"Tab2设置已保存(新用户): API Key已更新, 模型={model}" : "Tab2设置已保存: API Key已更新");
+            MessageBox.Show("Key配置已保存!", "保存成功", MessageBoxButton.OK, MessageBoxImage.Information);
+            Logger.Info($"Tab2设置已保存: 供应商={provider}, pollenations密匙={MaskKey(pollenationsApiKey)}, Deepseek密匙={MaskKey(deepseekApiKey)}");
 
             // 刷新余额查询
             _ = LoadBalanceAsync();
@@ -645,33 +799,6 @@ public class PetChatSettingPage : UserControl
             MessageBox.Show("保存失败: " + ex.Message, "错误", MessageBoxButton.OK, MessageBoxImage.Error);
             Logger.Error("Tab2保存设置失败", ex);
         }
-    }
-
-    private Dictionary<string, string> ReadPluginSettings()
-    {
-        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        try
-        {
-            string pluginDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? Directory.GetCurrentDirectory();
-            string path = Path.Combine(pluginDir, "plugin_settings.lps");
-            if (!File.Exists(path)) return result;
-
-            string content = File.ReadAllText(path, Encoding.UTF8);
-            string[] parts = content.Split(new[] { ":|" }, StringSplitOptions.RemoveEmptyEntries);
-            foreach (var p in parts)
-            {
-                int idx = p.IndexOf('#');
-                if (idx > 0)
-                {
-                    string key = p.Substring(0, idx).Trim();
-                    string val = p.Substring(idx + 1).Trim();
-                    if (!string.IsNullOrEmpty(key))
-                        result[key] = val;
-                }
-            }
-        }
-        catch { }
-        return result;
     }
 
     private TextBox _toolSearchBox = null!;
@@ -1162,10 +1289,10 @@ public class PetChatSettingPage : UserControl
                 _tools[i].Summary = _toolSummaryBoxes[i].Text;
             }
 
-            // 保存工具启用状态和简述
-            string pluginDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? Directory.GetCurrentDirectory();
-            string settingsPath = Path.Combine(pluginDir, "plugin_settings.lps");
-            _plugin.SkillManager.SaveEnabledSkills(settingsPath);
+            // 保存工具启用状态到 JSON 配置
+            var settings = Models.PluginSettings.Load(_plugin.SettingsPath);
+            _plugin.SkillManager.SaveEnabledSkills(settings);
+            settings.Save(_plugin.SettingsPath);
 
             MessageBox.Show(
                 "工具配置已保存!\n\n注意：自定义工具需要保存到 mod 插件的 plugin\\skills 文件夹中才能调用到，否则需要手动导入。",
@@ -1530,83 +1657,13 @@ public class PetChatSettingPage : UserControl
         historySwitchPanel.Children.Add(_switchHistoryBtn);
         stack.Children.Add(historySwitchPanel);
 
-        // 麦克风测试区
-        stack.Children.Add(new TextBlock
-        {
-            Text = "麦克风测试",
-            FontWeight = FontWeights.Bold,
-            FontSize = 14,
-            Margin = new Thickness(0, 20, 0, 4)
-        });
-
-        var micPanel = new StackPanel { Margin = new Thickness(0, 0, 0, 8) };
-
-        _micDeviceComboBox = new ComboBox
-        {
-            Width = 400,
-            FontSize = 12,
-            Padding = new Thickness(8, 4, 8, 4),
-            VerticalAlignment = VerticalAlignment.Center,
-            Margin = new Thickness(0, 0, 0, 6),
-        };
-        PopulateMicDeviceComboBox();
-        micPanel.Children.Add(_micDeviceComboBox);
-
-        _waveformCanvas = new Canvas
-        {
-            Width = 400,
-            Height = 100,
-            Background = new SolidColorBrush(Color.FromRgb(245, 245, 250)),
-        };
-        var waveformBorder = new Border
-        {
-            Child = _waveformCanvas,
-            BorderBrush = PrimaryBorderBrush,
-            BorderThickness = new Thickness(1),
-            Margin = new Thickness(0, 0, 0, 6),
-        };
-        micPanel.Children.Add(waveformBorder);
-
-        var micBtnStack = new StackPanel { Orientation = Orientation.Horizontal };
-        _testMicBtn = new Button
-        {
-            Content = "开始测试",
-            Padding = new Thickness(12, 6, 12, 6),
-            Margin = new Thickness(0, 0, 8, 0),
-            Background = PrimaryBrush,
-            Foreground = WhiteBrush,
-            FontSize = 13,
-            FontWeight = FontWeights.Bold,
-            BorderThickness = new Thickness(0),
-            Cursor = Cursors.Hand,
-        };
-        _testMicBtn.Click += OnTestMicrophone;
-        micBtnStack.Children.Add(_testMicBtn);
-
-        _saveMicBtn = new Button
-        {
-            Content = "保存设置",
-            Padding = new Thickness(12, 6, 12, 6),
-            Background = GreenBrush,
-            Foreground = WhiteBrush,
-            FontSize = 13,
-            FontWeight = FontWeights.Bold,
-            BorderThickness = new Thickness(0),
-            Cursor = Cursors.Hand,
-        };
-        _saveMicBtn.Click += OnSaveMicrophone;
-        micBtnStack.Children.Add(_saveMicBtn);
-        micPanel.Children.Add(micBtnStack);
-
-        stack.Children.Add(micPanel);
-
         return stack;
     }
 
     // ==================== 异步加载 ====================
     private async System.Threading.Tasks.Task LoadModelsAndBalanceAsync()
     {
-        // 加载模型
+        // 加载 pollenations 模型
         try
         {
             if (!string.IsNullOrWhiteSpace(_modelsUrl))
@@ -1618,12 +1675,30 @@ public class PetChatSettingPage : UserControl
                     foreach (var m in _models)
                         _modelComboBox.Items.Add(m);
                     if (_models.Count > 0)
-                        _modelComboBox.SelectedIndex = 0;
+                    {
+                        // 用户已保存模型时选中已保存的,否则选中第一个
+                        bool found = false;
+                        if (!string.IsNullOrEmpty(_plugin.SavedModel))
+                        {
+                            for (int i = 0; i < _modelComboBox.Items.Count; i++)
+                            {
+                                if (_modelComboBox.Items[i] is ModelOption mo && mo.Model == _plugin.SavedModel)
+                                {
+                                    _modelComboBox.SelectedIndex = i;
+                                    found = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!found)
+                            _modelComboBox.SelectedIndex = 0;
+                    }
                     else
                     {
                         _modelComboBox.Items.Add(new ModelOption("empty", "无可用模型"));
                         _modelComboBox.SelectedIndex = 0;
                     }
+                    UpdateModelCapabilities();
                 });
             }
         }
@@ -1652,11 +1727,11 @@ public class PetChatSettingPage : UserControl
             }
             if (string.IsNullOrWhiteSpace(apiKey))
             {
-                Logger.Warn("[Balance] 未提供 API Key");
+                Logger.Info("[Balance] 未提供 API Key");
                 Dispatcher.Invoke(() => _balanceText.Text = "余额: 未提供 API Key");
                 return;
             }
-            var (ok, pollen, err) = await ApiClient.GetBalanceAsync(apiKey);
+            var (ok, pollen, err) = await ApiClient.GetBalanceAsync(apiKey, _balanceUrl, _apiKeyInBody);
             Logger.Info($"[Balance] 查询结果: ok={ok}, pollen={pollen}, err={err}");
             Dispatcher.Invoke(() =>
             {
@@ -1674,45 +1749,16 @@ public class PetChatSettingPage : UserControl
     }
 
     /// <summary>
-    /// 从本地配置文件 plugin_settings.lps 中读取已保存的 API Key。
+    /// 从 JSON 配置文件 plugin_settings.json 中读取已保存的 API Key。
     /// </summary>
     private string ReadSavedApiKey()
     {
         try
         {
-            string pluginDir = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? Directory.GetCurrentDirectory();
-            string path = Path.Combine(pluginDir, "plugin_settings.lps");
-            Logger.Info($"[Balance] 读取配置文件: {path}");
-
-            if (!File.Exists(path))
-            {
-                Logger.Warn($"[Balance] 配置文件不存在: {path}");
-                return string.Empty;
-            }
-
-            string content = File.ReadAllText(path, Encoding.UTF8);
-            Logger.Info($"[Balance] 配置文件内容: {TruncateForLog(content, 500)}");
-
-            string[] parts = content.Split(new[] { ":|" }, StringSplitOptions.RemoveEmptyEntries);
-            Logger.Info($"[Balance] 解析出 {parts.Length} 个配置项");
-
-            foreach (var p in parts)
-            {
-                int idx = p.IndexOf('#');
-                if (idx > 0)
-                {
-                    string key = p.Substring(0, idx).Trim();
-                    string val = p.Substring(idx + 1).Trim();
-                    Logger.Info($"[Balance] 配置项: {key} = {(key == "api_key" ? MaskKey(val) : val)}");
-                    if (string.Equals(key, "api_key", StringComparison.OrdinalIgnoreCase))
-                    {
-                        Logger.Info($"[Balance] 找到 API Key: {MaskKey(val)}");
-                        return val;
-                    }
-                }
-            }
-            Logger.Warn("[Balance] 未找到 api_key 配置项");
-            return string.Empty;
+            var settings = Models.PluginSettings.Load(_plugin.SettingsPath);
+            string apiKey = settings.api_key ?? string.Empty;
+            Logger.Info($"[Balance] 从 JSON 读取 API Key: {(string.IsNullOrEmpty(apiKey) ? "(空)" : MaskKey(apiKey))}");
+            return apiKey;
         }
         catch (Exception ex)
         {
@@ -1795,234 +1841,20 @@ public class PetChatSettingPage : UserControl
         }
     }
 
-    // ==================== 麦克风测试 ====================
-    private void PopulateMicDeviceComboBox()
+    private class ProviderOption
     {
-        try
+        public string Key { get; set; } = string.Empty;
+        public string Value { get; set; } = string.Empty;
+
+        public ProviderOption(string key, string value)
         {
-            _micDeviceComboBox.Items.Clear();
-
-            int deviceCount = WaveIn.DeviceCount;
-            if (deviceCount == 0)
-            {
-                _micDeviceComboBox.Items.Add("未检测到麦克风设备");
-                _micDeviceComboBox.SelectedIndex = 0;
-                return;
-            }
-
-            for (int i = 0; i < deviceCount; i++)
-            {
-                var cap = WaveIn.GetCapabilities(i);
-                string deviceName = cap.ProductName;
-                _micDeviceComboBox.Items.Add(new MicDeviceItem { DeviceId = i.ToString(), DeviceName = deviceName });
-            }
-
-            string savedDevice = _plugin.SavedMicrophoneDevice;
-            if (!string.IsNullOrWhiteSpace(savedDevice) && int.TryParse(savedDevice, out int savedId))
-            {
-                for (int i = 0; i < _micDeviceComboBox.Items.Count; i++)
-                {
-                    if (_micDeviceComboBox.Items[i] is MicDeviceItem item && item.DeviceId == savedId.ToString())
-                    {
-                        _micDeviceComboBox.SelectedIndex = i;
-                        break;
-                    }
-                }
-            }
-
-            if (_micDeviceComboBox.SelectedIndex < 0)
-                _micDeviceComboBox.SelectedIndex = 0;
+            Key = key;
+            Value = value;
         }
-        catch (Exception ex)
-        {
-            _statusText.Text = "获取麦克风设备列表失败: " + ex.Message;
-            Logger.Error("获取麦克风设备列表失败", ex);
-        }
-    }
-
-    private void OnTestMicrophone(object sender, RoutedEventArgs e)
-    {
-        if (!_isTestingMic)
-        {
-            StartMicTest();
-        }
-        else
-        {
-            StopMicTest();
-        }
-    }
-
-    private void StartMicTest()
-    {
-        try
-        {
-            if (_micDeviceComboBox.SelectedItem is not MicDeviceItem selectedDevice)
-            {
-                _statusText.Text = "请先选择麦克风设备";
-                return;
-            }
-
-            int deviceId = int.Parse(selectedDevice.DeviceId);
-
-            _waveIn = new WaveInEvent
-            {
-                DeviceNumber = deviceId,
-                WaveFormat = new WaveFormat(16000, 16, 1)
-            };
-
-            _waveIn.DataAvailable += OnMicDataAvailable;
-            _waveIn.RecordingStopped += OnMicRecordingStopped;
-
-            _audioLevels.Clear();
-            _isTestingMic = true;
-            _testMicBtn.Content = "停止测试";
-            _testMicBtn.Background = RedBrush;
-            _micDeviceComboBox.IsEnabled = false;
-
-            _waveIn.StartRecording();
-            _statusText.Text = "麦克风测试中...";
-        }
-        catch (Exception ex)
-        {
-            _statusText.Text = "启动麦克风测试失败: " + ex.Message;
-            Logger.Error("启动麦克风测试失败", ex);
-        }
-    }
-
-    private void StopMicTest()
-    {
-        try
-        {
-            _isTestingMic = false;
-            _testMicBtn.Content = "开始测试";
-            _testMicBtn.Background = PrimaryBrush;
-            _micDeviceComboBox.IsEnabled = true;
-
-            if (_waveIn != null)
-            {
-                _waveIn.StopRecording();
-                _waveIn.Dispose();
-                _waveIn = null;
-            }
-
-            _audioLevels.Clear();
-            ClearWaveform();
-            _statusText.Text = "麦克风测试已停止";
-        }
-        catch (Exception ex)
-        {
-            _statusText.Text = "停止麦克风测试失败: " + ex.Message;
-            Logger.Error("停止麦克风测试失败", ex);
-        }
-    }
-
-    private void OnMicDataAvailable(object? sender, WaveInEventArgs e)
-    {
-        try
-        {
-            double maxLevel = 0;
-            for (int i = 0; i < e.BytesRecorded; i += 2)
-            {
-                short sample = (short)(e.Buffer[i] | (e.Buffer[i + 1] << 8));
-                double level = Math.Abs(sample) / 32768.0;
-                if (level > maxLevel) maxLevel = level;
-            }
-
-            _audioLevels.Add(maxLevel);
-            if (_audioLevels.Count > 100)
-                _audioLevels.RemoveAt(0);
-
-            Dispatcher.Invoke(UpdateWaveform);
-        }
-        catch
-        {
-        }
-    }
-
-    private void OnMicRecordingStopped(object? sender, StoppedEventArgs e)
-    {
-        try
-        {
-            if (_waveIn != null)
-            {
-                _waveIn.Dispose();
-                _waveIn = null;
-            }
-        }
-        catch
-        {
-        }
-    }
-
-    private void UpdateWaveform()
-    {
-        try
-        {
-            _waveformCanvas.Children.Clear();
-
-            if (_audioLevels.Count == 0) return;
-
-            double width = _waveformCanvas.Width;
-            double height = _waveformCanvas.Height;
-            double centerY = height / 2;
-            double barWidth = width / 100;
-
-            for (int i = 0; i < _audioLevels.Count; i++)
-            {
-                double level = _audioLevels[i];
-                double barHeight = level * height * 0.8;
-
-                var bar = new System.Windows.Shapes.Rectangle
-                {
-                    Width = barWidth - 1,
-                    Height = barHeight,
-                    Fill = PrimaryBrush,
-                    RadiusX = 2,
-                    RadiusY = 2,
-                };
-
-                Canvas.SetLeft(bar, i * barWidth);
-                Canvas.SetTop(bar, centerY - barHeight / 2);
-
-                _waveformCanvas.Children.Add(bar);
-            }
-        }
-        catch
-        {
-        }
-    }
-
-    private void ClearWaveform()
-    {
-        _waveformCanvas.Children.Clear();
-    }
-
-    private void OnSaveMicrophone(object sender, RoutedEventArgs e)
-    {
-        try
-        {
-            if (_micDeviceComboBox.SelectedItem is MicDeviceItem selectedDevice)
-            {
-                _plugin.SaveMicrophoneDevice(selectedDevice.DeviceId);
-                _statusText.Text = "麦克风设备设置已保存";
-                Logger.Info($"[Microphone] 用户保存麦克风设备: {selectedDevice.DeviceName} ({selectedDevice.DeviceId})");
-            }
-        }
-        catch (Exception ex)
-        {
-            _statusText.Text = "保存麦克风设置失败: " + ex.Message;
-            Logger.Error("保存麦克风设置失败", ex);
-        }
-    }
-
-    private class MicDeviceItem
-    {
-        public string DeviceId { get; set; } = string.Empty;
-        public string DeviceName { get; set; } = string.Empty;
 
         public override string ToString()
         {
-            return DeviceName;
+            return Key;
         }
     }
 }

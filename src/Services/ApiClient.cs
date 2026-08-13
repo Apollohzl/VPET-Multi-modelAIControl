@@ -47,11 +47,27 @@ public class StreamChunk
     /// </summary>
     public string? ToolCallId { get; init; }
 
+        /// <summary>
+        /// 工具参数字符串 (Type=ToolCall 时)。
+        /// </summary>
+        public string? ToolArguments { get; init; }
+
+        /// <summary>
+        /// 是否为"工具调用完成"chunk。Type=ToolCall 时:false 表示参数开始(仅提示),
+        /// true 表示参数已完整,可以执行工具。用此标志区分开始/完成,避免依赖空参数判断。
+        /// </summary>
+        public bool IsToolCallComplete { get; init; }
+    }
+
     /// <summary>
-    /// 工具参数字符串 (Type=ToolCall 时)。
+    /// 流式解析期间累积的单个工具调用(支持同一响应内并行多个)。
     /// </summary>
-    public string? ToolArguments { get; init; }
-}
+    internal class PendingToolCall
+    {
+        public string Id { get; set; } = "";
+        public string Name { get; set; } = "";
+        public StringBuilder Args { get; } = new();
+    }
 
 /// <summary>
 /// 用于与 Pollinations 兼容网关进行 HTTP 通信的客户端封装,仅使用 BCL 的 System.Net.Http 与 System.Text.Json。
@@ -173,18 +189,33 @@ internal static class ApiClient
     /// <summary>
     /// 查询账户余额(花粉)。
     /// 使用 GET 请求，API Key 通过 Authorization Header 传递。
+    /// balanceUrl 来自配置 endpoints.lps 的 balance_url（与 chat/models 一致的网关），
+    /// 缺失时回退到 pollinations 官方地址；apiKeyInBody=true 时额外把 key 作为 API_Key 查询参数发送（兼容部分网关）。
     /// </summary>
-    public static async Task<(bool ok, decimal pollen, string error)> GetBalanceAsync(string apiKey)
+    public static async Task<(bool ok, decimal pollen, string error)> GetBalanceAsync(
+        string apiKey,
+        string balanceUrl = "https://gen.pollinations.ai/account/balance",
+        bool apiKeyInBody = false)
     {
-        const string balanceUrl = "https://gen.pollinations.ai/account/balance";
+        // 余额查询接口地址：优先使用调用方传入的（来自 endpoints.lps 的 balance_url），缺失时回退到默认地址
+        if (string.IsNullOrWhiteSpace(balanceUrl))
+            balanceUrl = "https://gen.pollinations.ai/account/balance";
 
         if (string.IsNullOrWhiteSpace(apiKey)) return (false, 0, "错误: 未提供 API Key");
 
-        Logger.Info($"[Balance] 开始查询余额, URL={balanceUrl}, API Key={MaskApiKey(apiKey)}");
+        // 部分网关（api_key_in_body=true）要求把 key 作为 API_Key 查询参数传递
+        string requestUrl = balanceUrl;
+        if (apiKeyInBody && !string.IsNullOrWhiteSpace(apiKey))
+        {
+            requestUrl += (requestUrl.Contains('?') ? '&' : '?') + "API_Key=" + Uri.EscapeDataString(apiKey);
+        }
+
+        Logger.Info($"[Balance] 开始查询余额, URL={requestUrl}, API Key={MaskApiKey(apiKey)}");
 
         try
         {
-            using var req = new HttpRequestMessage(HttpMethod.Get, balanceUrl);
+            using var req = new HttpRequestMessage(HttpMethod.Get, requestUrl);
+            // 保留 Bearer 头以兼容 pollinations 官方接口
             req.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
             req.Headers.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
 
@@ -208,7 +239,7 @@ internal static class ApiClient
             if (result.ok)
                 Logger.Info($"[Balance] 查询成功, 花粉={result.pollen}");
             else
-                Logger.Error($"[Balance] 解析失败: {result.error}");
+                Logger.Error($"[Balance] 解析失败: {result.err}");
             return result;
         }
         catch (Exception ex)
@@ -249,6 +280,7 @@ internal static class ApiClient
     /// <summary>
     /// 以流式方式发起对话,按顺序返回每一段生成的文本片段。
     /// 同时兼容 SSE 格式和普通 JSON 响应。
+    /// useBearerAuth=true 时使用 Bearer Token 认证(Deepseek),false 时使用 body 中的 API_Key(pollenations)。
     /// </summary>
     public static async IAsyncEnumerable<StreamChunk> StreamChatAsync(
         string url,
@@ -256,7 +288,8 @@ internal static class ApiClient
         string model,
         List<ChatMessage> messages,
         [EnumeratorCancellation] CancellationToken ct,
-        List<object>? tools = null)
+        List<object>? tools = null,
+        bool useBearerAuth = false)
     {
         string maskedKey = MaskApiKey(apiKey);
         string messagesJson = JsonSerializer.Serialize(messages, JsonOpts);
@@ -264,39 +297,34 @@ internal static class ApiClient
         // 日志：请求开始
         Logger.Info($"[StreamChat] 请求接口: {url}");
         Logger.Info($"[StreamChat] 模型: {model}");
+        Logger.Info($"[StreamChat] 认证方式: {(useBearerAuth ? "Bearer Token" : "API_Key in body")}");
         Logger.Info($"[StreamChat] APIKey参数值: {maskedKey}");
         Logger.Info($"[StreamChat] 提交历史记录: {TruncateForLog(messagesJson)}");
 
-        // 构建请求体
-        object bodyObj;
+        // 构建请求体(useBearerAuth 时不放 API_Key 到 body)
+        // Deepseek V4 模型默认开启 thinking 模式，工具调用后必须回传 reasoning_content。
+        // 我们的实现不保存 reasoning_content，因此强制关闭 thinking 模式避免 400 错误。
+        // 参考: https://api-docs.deepseek.com/guides/thinking_mode
+        var bodyDict = new Dictionary<string, object?>
+        {
+            ["model"] = model,
+            ["messages"] = SanitizeAndConvert(messages),
+            ["safe"] = false,
+            ["stream"] = true,
+            ["stream_options"] = new { include_usage = true },
+            ["API_Key"] = useBearerAuth ? null : apiKey,
+        };
+        if (useBearerAuth)
+        {
+            bodyDict["thinking"] = new { type = "disabled" };
+        }
         if (tools != null && tools.Count > 0)
         {
-            bodyObj = new
-            {
-                model,
-                messages = messages.ConvertAll(m => ConvertMessageToApiFormat(m)),
-                safe = false,
-                stream = true,
-                stream_options = new { include_usage = true },
-                API_Key = apiKey,
-                tool_choice = "auto",
-                tools = tools,
-                parallel_tool_calls = true,
-            };
+            bodyDict["tool_choice"] = "auto";
+            bodyDict["tools"] = tools;
+            bodyDict["parallel_tool_calls"] = true;
         }
-        else
-        {
-            bodyObj = new
-            {
-                model,
-                messages = messages.ConvertAll(m => ConvertMessageToApiFormat(m)),
-                safe = false,
-                stream = true,
-                stream_options = new { include_usage = true },
-                API_Key = apiKey,
-            };
-        }
-        var jsonBody = JsonSerializer.Serialize(bodyObj, JsonOpts);
+        var jsonBody = JsonSerializer.Serialize(bodyDict, JsonOpts);
 
         // 记录完整请求体(超长时截断),便于调试
         Logger.Info($"[StreamChat] 请求体长度: {jsonBody.Length} 字符");
@@ -312,6 +340,9 @@ internal static class ApiClient
 
         using var content = new StringContent(jsonBody, System.Text.Encoding.UTF8, "application/json");
         using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = content };
+        // Bearer Token 认证(Deepseek)
+        if (useBearerAuth && !string.IsNullOrWhiteSpace(apiKey))
+            request.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
         using var response = await _httpStream.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, ct);
         if (!response.IsSuccessStatusCode)
         {
@@ -329,10 +360,8 @@ internal static class ApiClient
         using var stream = await response.Content.ReadAsStreamAsync();
         using var reader = new StreamReader(stream, System.Text.Encoding.UTF8);
 
-        // 工具调用解析所需的局部变量
-        StringBuilder accumulatedToolArgs = new();
-        string lastToolName = "";
-        string lastToolCallId = "";
+        // 工具调用解析所需的局部变量（支持同一响应内并行多个工具调用）
+        var pendingToolCalls = new List<PendingToolCall>();
 
         string? line;
         bool isSSE = false;
@@ -350,8 +379,8 @@ internal static class ApiClient
                 if (payload == "[DONE]") break;
                 if (string.IsNullOrEmpty(payload)) continue;
 
-                // 解析 chunk，支持文本和工具调用
-                var chunks = ParseStreamChunk(payload, accumulatedToolArgs, lastToolName, lastToolCallId, out lastToolName, out lastToolCallId);
+                // 解析 chunk，支持文本和并行工具调用
+                var chunks = ParseStreamChunk(payload, pendingToolCalls);
                 foreach (var chunk in chunks)
                 {
                     if (chunk.Type == StreamChunkType.Text && !string.IsNullOrEmpty(chunk.Text))
@@ -370,7 +399,7 @@ internal static class ApiClient
                     var trimmed = line.Trim();
                     if (trimmed.StartsWith("{") && !string.IsNullOrEmpty(trimmed))
                     {
-                        var chunks = ParseStreamChunk(trimmed, accumulatedToolArgs, lastToolName, lastToolCallId, out lastToolName, out lastToolCallId);
+                        var chunks = ParseStreamChunk(trimmed, pendingToolCalls);
                         foreach (var chunk in chunks)
                         {
                             if (chunk.Type == StreamChunkType.Text && !string.IsNullOrEmpty(chunk.Text))
@@ -389,19 +418,15 @@ internal static class ApiClient
     }
 
     /// <summary>
-    /// 解析流式 chunk，支持文本和工具调用。
+    /// 解析流式 chunk，支持文本与并行多个工具调用。
+    /// pendingToolCalls 跨多次调用累积,在 finish_reason=="tool_calls" 时为每个工具调用
+    /// 产生一个完成的 ToolCall chunk(携带完整参数与 IsToolCallComplete=true)。
     /// </summary>
     private static List<StreamChunk> ParseStreamChunk(
         string payload,
-        StringBuilder accumulatedToolArgs,
-        string lastToolName,
-        string lastToolCallId,
-        out string outLastToolName,
-        out string outLastToolCallId)
+        List<PendingToolCall> pendingToolCalls)
     {
         var chunks = new List<StreamChunk>();
-        outLastToolName = lastToolName;
-        outLastToolCallId = lastToolCallId;
 
         using var doc = ParseJson(payload);
         var root = doc.RootElement;
@@ -420,37 +445,8 @@ internal static class ApiClient
         if (choice.TryGetProperty("finish_reason", out var fr) && fr.ValueKind == JsonValueKind.String)
             finish_reason = fr.GetString();
 
-        // 检查 delta.tool_calls
         if (choice.TryGetProperty("delta", out var delta) && delta.ValueKind == JsonValueKind.Object)
         {
-            if (delta.TryGetProperty("tool_calls", out var toolCalls) && toolCalls.ValueKind == JsonValueKind.Array)
-            {
-                foreach (var tc in toolCalls.EnumerateArray())
-                {
-                    var func = tc.GetProperty("function");
-                    string funcName = func.TryGetProperty("name", out var n) ? n.GetString() ?? "" : "";
-                    string funcArgs = func.TryGetProperty("arguments", out var a) ? a.GetString() ?? "" : "";
-                    string callId = tc.TryGetProperty("id", out var id) ? id.GetString() ?? "" : "";
-
-                    // 如果是第一次遇到这个工具调用，yield return ToolCall 类型(空arguments表示开始)
-                    if (!string.IsNullOrEmpty(funcName) && accumulatedToolArgs.Length == 0)
-                    {
-                        outLastToolName = funcName;
-                        outLastToolCallId = callId;
-                        chunks.Add(new StreamChunk
-                        {
-                            Type = StreamChunkType.ToolCall,
-                            ToolName = funcName,
-                            ToolCallId = callId,
-                            ToolArguments = ""
-                        });
-                    }
-
-                    // 累积 arguments
-                    accumulatedToolArgs.Append(funcArgs);
-                }
-            }
-
             // 检查 delta.content (普通文本)
             if (delta.TryGetProperty("content", out var contentEl) && contentEl.ValueKind == JsonValueKind.String)
             {
@@ -460,23 +456,131 @@ internal static class ApiClient
                     chunks.Add(new StreamChunk { Type = StreamChunkType.Text, Text = text });
                 }
             }
+
+            // 检查 delta.tool_calls（可能并行多个）
+            if (delta.TryGetProperty("tool_calls", out var toolCalls) && toolCalls.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var tc in toolCalls.EnumerateArray())
+                {
+                    string callId = tc.TryGetProperty("id", out var idEl) ? idEl.GetString() ?? "" : "";
+                    string funcName = "";
+                    string funcArgs = "";
+                    if (tc.TryGetProperty("function", out var funcEl) && funcEl.ValueKind == JsonValueKind.Object)
+                    {
+                        if (funcEl.TryGetProperty("name", out var n)) funcName = n.GetString() ?? "";
+                        if (funcEl.TryGetProperty("arguments", out var a)) funcArgs = a.GetString() ?? "";
+                    }
+
+                    // 找到(或创建)对应的 pending 工具调用
+                    PendingToolCall? pending = null;
+                    foreach (var p in pendingToolCalls)
+                    {
+                        if (!string.IsNullOrEmpty(callId) && p.Id == callId) { pending = p; break; }
+                    }
+                    if (pending == null)
+                    {
+                        pending = new PendingToolCall { Id = callId, Name = funcName };
+                        pendingToolCalls.Add(pending);
+                        // 首次出现且有函数名时,发出一个"开始"提示 chunk(空参数)
+                        if (!string.IsNullOrEmpty(funcName))
+                        {
+                            chunks.Add(new StreamChunk
+                            {
+                                Type = StreamChunkType.ToolCall,
+                                ToolName = funcName,
+                                ToolCallId = callId,
+                                ToolArguments = "",
+                                IsToolCallComplete = false
+                            });
+                        }
+                    }
+                    else if (string.IsNullOrEmpty(pending.Name) && !string.IsNullOrEmpty(funcName))
+                    {
+                        // 函数名迟到(部分流先给 id,后给 name):补一个"开始"提示
+                        pending.Name = funcName;
+                        chunks.Add(new StreamChunk
+                        {
+                            Type = StreamChunkType.ToolCall,
+                            ToolName = funcName,
+                            ToolCallId = callId,
+                            ToolArguments = "",
+                            IsToolCallComplete = false
+                        });
+                    }
+
+                    // 累积该调用的参数片段
+                    pending.Args.Append(funcArgs);
+                }
+            }
         }
 
-        // 在 finish_reason == "tool_calls" 时输出完整的工具调用
+        // 流结束时,为每个 pending 工具调用输出完整的 ToolCall(携带完整参数)
         if (finish_reason == "tool_calls")
         {
-            chunks.Add(new StreamChunk
+            foreach (var pending in pendingToolCalls)
             {
-                Type = StreamChunkType.ToolCall,
-                ToolName = lastToolName,
-                ToolCallId = lastToolCallId,
-                ToolArguments = accumulatedToolArgs.ToString()
-            });
-            accumulatedToolArgs.Clear();
+                chunks.Add(new StreamChunk
+                {
+                    Type = StreamChunkType.ToolCall,
+                    ToolName = pending.Name,
+                    ToolCallId = pending.Id,
+                    ToolArguments = pending.Args.ToString(),
+                    IsToolCallComplete = true
+                });
+            }
+            pendingToolCalls.Clear();
             chunks.Add(new StreamChunk { Type = StreamChunkType.Done });
         }
 
         return chunks;
+    }
+
+    /// <summary>
+    /// 复制消息列表并修复 tool_calls / tool 消息配对:确保每个带 tool_calls 的 assistant
+    /// 消息之后都存在对应 tool_call_id 的 tool 消息;若缺失则插入占位 tool 消息。
+    /// 只修改用于发送的副本,不污染调用方的历史文件。
+    /// </summary>
+    private static object SanitizeAndConvert(List<ChatMessage> messages)
+    {
+        var apiMessages = messages.ConvertAll(m => m);
+        EnsureToolMessages(apiMessages);
+        return apiMessages.ConvertAll(m => ConvertMessageToApiFormat(m));
+    }
+
+    /// <summary>
+    /// 确保每个带 tool_calls 的 assistant 消息之后都存在对应的 tool 消息。缺失时在其后
+    /// 插入占位 tool 消息,避免严格供应商(如 Deepseek)返回 400:
+    /// "An assistant message with 'tool_calls' must be followed by tool messages..."。
+    /// </summary>
+    private static void EnsureToolMessages(List<ChatMessage> messages)
+    {
+        for (int i = 0; i < messages.Count; i++)
+        {
+            var m = messages[i];
+            if (m.Role != "assistant" || m.FunctionCall == null || string.IsNullOrEmpty(m.FunctionCall.Id))
+                continue;
+
+            string id = m.FunctionCall.Id;
+            bool found = false;
+            for (int j = i + 1; j < messages.Count; j++)
+            {
+                var after = messages[j];
+                if (after.Role == "tool" && after.ToolCallId == id) { found = true; break; }
+                // 工具消息必须紧跟在 assistant 之后,遇到其它角色即视为缺失
+                if (after.Role == "assistant" || after.Role == "user" || after.Role == "system") break;
+            }
+
+            if (!found)
+            {
+                messages.Insert(i + 1, new ChatMessage
+                {
+                    Role = "tool",
+                    ToolCallId = id,
+                    Content = new List<ContentItem> { new ContentItem { Type = "text", Text = "(工具结果缺失,已自动补齐)" } }
+                });
+                i++; // 跳过刚插入的占位消息
+            }
+        }
     }
 
     private static string MaskApiKey(string? key)
