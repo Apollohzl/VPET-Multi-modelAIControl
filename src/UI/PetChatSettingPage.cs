@@ -531,10 +531,10 @@ public class PetChatSettingPage : UserControl
         introText.Inlines.Add(new Run("实在不行可以加QQ群哦：970894907"));
         introStack.Children.Add(introText);
 
-        // 答疑解惑文档按钮(放在介绍文字下方)
+        // Key配置教程按钮(放在介绍文字下方)
         var docBtn = new Button
         {
-            Content = "答疑解惑文档",
+            Content = "Key配置教程",
             HorizontalAlignment = HorizontalAlignment.Left,
             Padding = new Thickness(12, 4, 12, 4),
             Background = PrimaryBrush,
