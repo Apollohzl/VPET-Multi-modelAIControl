@@ -169,13 +169,27 @@ public class ChatBridge
                                 string resultTextLog = result.Count > 0 && result[0].Type == "text" ? result[0].Text ?? "" : $"[{result.Count} 个 content 项]";
                                 Logger.ToolResult(callName, resultTypeLog, resultTextLog);
 
+                                // 将工具调用前累积的文本作为 assistant 消息的 content,
+                                // 避免在 tool 消息之后追加多余的 assistant 文本消息导致 API 400 错误
+                                List<Models.ContentItem>? toolCallContent = null;
+                                string textBeforeToolCall = fullText.ToString().Trim();
+                                if (!string.IsNullOrEmpty(textBeforeToolCall))
+                                {
+                                    toolCallContent = new List<Models.ContentItem>
+                                    {
+                                        new Models.ContentItem { Type = "text", Text = textBeforeToolCall }
+                                    };
+                                    fullText.Clear();
+                                    Logger.Info($"[Chat] 工具调用前的文本已合并到 assistant tool_call 消息: {textBeforeToolCall}");
+                                }
+
                                 history.AppendAssistantToolCall(new FunctionCallInfo
                                 {
                                     Type = "function",
                                     Id = callId,
                                     Name = callName,
                                     Arguments = argsJson
-                                });
+                                }, toolCallContent);
                                 history.AppendTool(callId, result);
 
                                 _historyStore.Save(history);
@@ -211,15 +225,11 @@ public class ChatBridge
             // 6. 判断是普通对话结束还是工具调用后需要继续
             if (hadToolCall)
             {
-                // 工具调用完成,追加最终的 assistant 回复并继续循环
-                string finalText = fullText.ToString();
-                if (!string.IsNullOrWhiteSpace(finalText))
-                {
-                    history.AppendAssistant(finalText);
-                }
-
+                // 工具调用完成,工具调用前的文本已合并到 assistant tool_call 消息中。
+                // 正常情况下(full_reason="tool_calls")工具调用后不会再有文本,
+                // 无需追加多余的 assistant 文本消息(否则会导致API 400错误)。
                 _historyStore.Save(history);
-                Logger.Info($"[Chat] 助手回复已保存到文件");
+                Logger.Info($"[Chat] 工具调用轮次已保存到文件,继续循环等待AI回复");
 
                 fullText.Clear();
             }

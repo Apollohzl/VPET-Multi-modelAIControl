@@ -74,6 +74,20 @@ public class ConversationHistory
     }
 
     /// <summary>
+    /// 添加带文本内容和工具调用的 assistant 消息。
+    /// 将AI在工具调用前生成的文本与tool_calls合并到同一条消息,符合API预期格式。
+    /// </summary>
+    public void AppendAssistantToolCall(FunctionCallInfo fc, List<ContentItem>? content)
+    {
+        Messages.Add(new ChatMessage
+        {
+            Role = "assistant",
+            Content = content,
+            FunctionCall = fc
+        });
+    }
+
+    /// <summary>
     /// 添加 tool 消息（文本类型）。
     /// </summary>
     public void AppendTool(string toolCallId, string text)

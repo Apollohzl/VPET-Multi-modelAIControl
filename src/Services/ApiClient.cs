@@ -658,18 +658,20 @@ internal static class ApiClient
 
     /// <summary>
     /// 将 ChatMessage 转换为 OpenAI API 格式的消息对象。
-    /// 注意：ChatMessage.Content 已经是 API 原生格式（List<ContentItem>），直接透传即可。
+    /// 注意:
+    ///   - tool / assistant / system 消息的 content 转换为字符串(DeepSeek 等供应商要求字符串格式)
+    ///   - user 消息的 content 保持数组格式(支持多模态输入: 图片/音频/视频/文件)
     /// </summary>
     private static object ConvertMessageToApiFormat(ChatMessage m)
     {
-        // role 为 tool 的消息
+        // role 为 tool 的消息: content 必须是字符串(DeepSeek 等严格供应商要求)
         if (m.Role == "tool")
         {
             return new
             {
                 role = m.Role,
                 tool_call_id = m.ToolCallId ?? "",
-                content = m.Content ?? new List<ContentItem>()
+                content = ExtractTextFromContent(m.Content)
             };
         }
 
@@ -690,13 +692,14 @@ internal static class ApiClient
                     }
                 }
             };
-            // 带 tool_calls 的 assistant 消息也可以有 content
-            if (m.Content != null && m.Content.Count > 0)
+            // 带 tool_calls 的 assistant 消息也可以有 content,但必须是字符串
+            string textContent = ExtractTextFromContent(m.Content);
+            if (!string.IsNullOrEmpty(textContent))
             {
                 return new
                 {
                     role = m.Role,
-                    content = m.Content,
+                    content = textContent,
                     tool_calls = toolCalls
                 };
             }
@@ -707,11 +710,51 @@ internal static class ApiClient
             };
         }
 
-        // 普通消息 (system / user / assistant纯文本): content 直接透传
+        // role 为 assistant 纯文本消息: content 必须是字符串
+        if (m.Role == "assistant")
+        {
+            return new
+            {
+                role = m.Role,
+                content = ExtractTextFromContent(m.Content)
+            };
+        }
+
+        // role 为 system: content 必须是字符串
+        if (m.Role == "system")
+        {
+            return new
+            {
+                role = m.Role,
+                content = ExtractTextFromContent(m.Content)
+            };
+        }
+
+        // role 为 user: content 保持数组格式(支持多模态: 图片/音频/视频/文件)
         return new
         {
             role = m.Role,
             content = m.Content ?? new List<ContentItem>()
         };
+    }
+
+    /// <summary>
+    /// 从 ContentItem 列表中提取纯文本内容。
+    /// DeepSeek 等严格供应商要求 tool/assistant 消息的 content 为字符串类型,
+    /// 而非数组格式。此方法将 content 数组中的 text 元素拼接为字符串。
+    /// </summary>
+    private static string ExtractTextFromContent(List<ContentItem>? content)
+    {
+        if (content == null || content.Count == 0) return "";
+        var sb = new StringBuilder();
+        foreach (var item in content)
+        {
+            if (item.Type == "text" && !string.IsNullOrEmpty(item.Text))
+            {
+                if (sb.Length > 0) sb.Append('\n');
+                sb.Append(item.Text);
+            }
+        }
+        return sb.ToString();
     }
 }
