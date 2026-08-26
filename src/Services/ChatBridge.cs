@@ -120,6 +120,9 @@ public class ChatBridge
             // 发送请求并处理流
             bool hadToolCall = false;
             bool inToolCallMode = false;   // 一旦检测到工具调用,不再接受 Text chunk(避免AI把工具调用当文本输出)
+            // 记录每个 callId 对应的工具名(从"开始"chunk 获取),用于"完成"chunk 时 fallback
+            // 解决 DeepSeek 流式响应中 function.name 可能只在首个 chunk 给出、后续 chunk 及完成 chunk 时为空的问题
+            var toolCallNames = new Dictionary<string, string>();
 
             try
             {
@@ -148,16 +151,24 @@ public class ChatBridge
                             // ============================================================
                             //  工具调用"开始"提示(仅用于 UI 反馈,不执行工具)
                             //  操作: 立刻清空调用前已输出的文本气泡 → 替换为工具调用状态
+                            //  同时记录 callId → 工具名 映射,供"完成"chunk fallback 使用
                             // ============================================================
                             if (!chunk.IsToolCallComplete)
                             {
-                                var toolHint = _skillManager.GetToolByName(chunk.ToolName ?? "");
-                                string summaryHint = toolHint?.Summary ?? chunk.ToolName ?? "工具";
+                                string startName = chunk.ToolName ?? "";
+                                string startId = chunk.ToolCallId ?? "";
+                                // 记录映射,供完成 chunk 时 fallback
+                                if (!string.IsNullOrEmpty(startId) && !string.IsNullOrEmpty(startName))
+                                {
+                                    toolCallNames[startId] = startName;
+                                }
+
+                                var toolHint = _skillManager.GetToolByName(startName);
+                                string summaryHint = toolHint?.Summary ?? (string.IsNullOrEmpty(startName) ? "工具" : startName);
                                 string statusText = $"正在调用「{summaryHint}」工具...";
-                                Logger.Info($"[Chat] 检测到工具调用开始: {chunk.ToolName},清空当前气泡并显示状态");
+                                Logger.Info($"[Chat] 检测到工具调用开始: name={startName}, id={startId},清空当前气泡并显示状态");
                                 _dispatcher.Invoke(() =>
                                 {
-                                    // 用 UpdateAllText 重置当前流式气泡,覆盖已输出的文本
                                     sis.UpdateAllText(statusText);
                                 });
                                 break;
@@ -165,21 +176,36 @@ public class ChatBridge
 
                             // ============================================================
                             //  工具调用"完成": 真正执行工具 → 等待结果 → 写入历史
+                            //  注意: 不再重复 sis.UpdateAllText(开始chunk已显示过),避免闪烁
                             // ============================================================
                             {
-                                string callName = chunk.ToolName ?? "";
                                 string callId = chunk.ToolCallId ?? "";
+                                // 工具名 fallback: 优先用完成 chunk 的 ToolName,为空则查开始 chunk 记录的映射
+                                string callName = chunk.ToolName ?? "";
+                                if (string.IsNullOrEmpty(callName) && !string.IsNullOrEmpty(callId) && toolCallNames.TryGetValue(callId, out var fallbackName))
+                                {
+                                    callName = fallbackName;
+                                    Logger.Info($"[Chat] 完成chunk工具名为空,从开始chunk记录恢复: {callName}");
+                                }
+
                                 string argsJson = string.IsNullOrEmpty(chunk.ToolArguments) ? "{}" : chunk.ToolArguments!;
 
-                                var tool = _skillManager.GetToolByName(callName);
-                                string summary = tool?.Summary ?? callName;
-                                string execStatusText = $"正在调用「{summary}」工具...";
-                                _dispatcher.Invoke(() =>
+                                if (string.IsNullOrEmpty(callName))
                                 {
-                                    sis.UpdateAllText(execStatusText);
-                                });
+                                    Logger.Error($"[Chat] 工具调用完成但工具名为空(id={callId}),参数: {argsJson},跳过执行");
+                                    // 写入失败结果到历史,让AI知道工具调用失败
+                                    history.AppendAssistantToolCall(new ToolCallInfo
+                                    {
+                                        Id = callId,
+                                        Type = "function",
+                                        Function = new ToolCallFunction { Name = "", Arguments = argsJson }
+                                    }, null);
+                                    history.AppendTool(callId, "工具调用失败:工具名为空");
+                                    _historyStore.Save(history);
+                                    continue;
+                                }
 
-                                Logger.Info($"[Chat] 开始执行工具: {callName},等待返回...");
+                                Logger.Info($"[Chat] 开始执行工具: {callName}, id={callId}, 参数长度={argsJson.Length}, 等待返回...");
                                 Logger.ToolCall(callName, argsJson);
 
                                 // 等待工具执行完成(await)再继续
