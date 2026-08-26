@@ -61,9 +61,12 @@ public class StreamChunk
 
     /// <summary>
     /// 流式解析期间累积的单个工具调用(支持同一响应内并行多个)。
+    /// 注意: OpenAI/DeepSeek 流式响应中,tool_calls 数组的后续 chunk 只带 index 字段
+    /// (不带 id 和 name),只有首个 chunk 带 id 和 name。必须用 index 匹配 pending。
     /// </summary>
     internal class PendingToolCall
     {
+        public int Index { get; set; } = -1;
         public string Id { get; set; } = "";
         public string Name { get; set; } = "";
         public StringBuilder Args { get; } = new();
@@ -462,6 +465,12 @@ internal static class ApiClient
             {
                 foreach (var tc in toolCalls.EnumerateArray())
                 {
+                    // OpenAI/DeepSeek 流式格式:
+                    //   首个 chunk: { id, type, function: { name, arguments } }
+                    //   后续 chunk: { index, function: { arguments: "片段" } }  ← 只有 index,没有 id/name!
+                    // 必须用 index 匹配 pending,否则后续 arguments 片段会丢失
+                    int callIndex = tc.TryGetProperty("index", out var idxEl) && idxEl.ValueKind == JsonValueKind.Number
+                        ? idxEl.GetInt32() : -1;
                     string callId = tc.TryGetProperty("id", out var idEl) ? idEl.GetString() ?? "" : "";
                     string funcName = "";
                     string funcArgs = "";
@@ -471,15 +480,25 @@ internal static class ApiClient
                         if (funcEl.TryGetProperty("arguments", out var a)) funcArgs = a.GetString() ?? "";
                     }
 
-                    // 找到(或创建)对应的 pending 工具调用
+                    // 找到对应的 pending 工具调用:
+                    // 优先用 index 匹配(后续 chunk 只有 index),其次用 id 匹配(首个 chunk)
                     PendingToolCall? pending = null;
                     foreach (var p in pendingToolCalls)
                     {
-                        if (!string.IsNullOrEmpty(callId) && p.Id == callId) { pending = p; break; }
+                        if (callIndex >= 0 && p.Index == callIndex) { pending = p; break; }
                     }
+                    if (pending == null && !string.IsNullOrEmpty(callId))
+                    {
+                        foreach (var p in pendingToolCalls)
+                        {
+                            if (p.Id == callId) { pending = p; break; }
+                        }
+                    }
+
                     if (pending == null)
                     {
-                        pending = new PendingToolCall { Id = callId, Name = funcName };
+                        // 创建新的 pending(首个 chunk)
+                        pending = new PendingToolCall { Index = callIndex, Id = callId, Name = funcName };
                         pendingToolCalls.Add(pending);
                         // 首次出现且有函数名时,发出一个"开始"提示 chunk(空参数)
                         if (!string.IsNullOrEmpty(funcName))
@@ -494,21 +513,27 @@ internal static class ApiClient
                             });
                         }
                     }
-                    else if (string.IsNullOrEmpty(pending.Name) && !string.IsNullOrEmpty(funcName))
+                    else
                     {
-                        // 函数名迟到(部分流先给 id,后给 name):补一个"开始"提示
-                        pending.Name = funcName;
-                        chunks.Add(new StreamChunk
+                        // 后续 chunk: 补充 id(如果之前没有)和 name(如果之前没有)
+                        if (string.IsNullOrEmpty(pending.Id) && !string.IsNullOrEmpty(callId))
+                            pending.Id = callId;
+                        if (string.IsNullOrEmpty(pending.Name) && !string.IsNullOrEmpty(funcName))
                         {
-                            Type = StreamChunkType.ToolCall,
-                            ToolName = funcName,
-                            ToolCallId = callId,
-                            ToolArguments = "",
-                            IsToolCallComplete = false
-                        });
+                            pending.Name = funcName;
+                            // 函数名迟到(部分流先给 id/index,后给 name):补一个"开始"提示
+                            chunks.Add(new StreamChunk
+                            {
+                                Type = StreamChunkType.ToolCall,
+                                ToolName = funcName,
+                                ToolCallId = pending.Id,
+                                ToolArguments = "",
+                                IsToolCallComplete = false
+                            });
+                        }
                     }
 
-                    // 累积该调用的参数片段
+                    // 累积该调用的参数片段(可能分片返回,如 {"q":" → 波点音乐 → "})
                     pending.Args.Append(funcArgs);
                 }
             }
