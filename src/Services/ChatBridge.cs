@@ -119,6 +119,7 @@ public class ChatBridge
 
             // 发送请求并处理流
             bool hadToolCall = false;
+            bool inToolCallMode = false;   // 一旦检测到工具调用,不再接受 Text chunk(避免AI把工具调用当文本输出)
 
             try
             {
@@ -128,27 +129,43 @@ public class ChatBridge
                     switch (chunk.Type)
                     {
                         case StreamChunkType.Text:
+                            // 进入工具调用模式后,不再接收 Text chunk 到流式显示,
+                            // 但仍要累积到 fullText(作为 assistant tool_call 的 content 保留)
                             if (!string.IsNullOrEmpty(chunk.Text))
                             {
                                 fullText.Append(chunk.Text);
-                                _dispatcher.Invoke(() => sis.UpdateText(chunk.Text));
+                                if (!inToolCallMode)
+                                {
+                                    _dispatcher.Invoke(() => sis.UpdateText(chunk.Text));
+                                }
                             }
                             break;
 
                         case StreamChunkType.ToolCall:
                             hadToolCall = true;
-                            // 工具调用"开始"提示(参数为空,仅用于 UI 反馈,不执行)
+                            inToolCallMode = true;
+
+                            // ============================================================
+                            //  工具调用"开始"提示(仅用于 UI 反馈,不执行工具)
+                            //  操作: 立刻清空调用前已输出的文本气泡 → 替换为工具调用状态
+                            // ============================================================
                             if (!chunk.IsToolCallComplete)
                             {
                                 var toolHint = _skillManager.GetToolByName(chunk.ToolName ?? "");
                                 string summaryHint = toolHint?.Summary ?? chunk.ToolName ?? "工具";
+                                string statusText = $"正在调用「{summaryHint}」工具...";
+                                Logger.Info($"[Chat] 检测到工具调用开始: {chunk.ToolName},清空当前气泡并显示状态");
                                 _dispatcher.Invoke(() =>
                                 {
-                                    CallMainSayRnd(main, $"正在调用「{summaryHint}」工具...");
+                                    // 用 UpdateAllText 重置当前流式气泡,覆盖已输出的文本
+                                    sis.UpdateAllText(statusText);
                                 });
                                 break;
                             }
-                            // 工具调用完成:执行并写入历史(支持同一响应内并行多个)
+
+                            // ============================================================
+                            //  工具调用"完成": 真正执行工具 → 等待结果 → 写入历史
+                            // ============================================================
                             {
                                 string callName = chunk.ToolName ?? "";
                                 string callId = chunk.ToolCallId ?? "";
@@ -156,18 +173,22 @@ public class ChatBridge
 
                                 var tool = _skillManager.GetToolByName(callName);
                                 string summary = tool?.Summary ?? callName;
+                                string execStatusText = $"正在调用「{summary}」工具...";
                                 _dispatcher.Invoke(() =>
                                 {
-                                    CallMainSayRnd(main, $"正在调用「{summary}」工具...");
+                                    sis.UpdateAllText(execStatusText);
                                 });
 
+                                Logger.Info($"[Chat] 开始执行工具: {callName},等待返回...");
                                 Logger.ToolCall(callName, argsJson);
 
+                                // 等待工具执行完成(await)再继续
                                 var result = await _toolExecutor.ExecuteAsync(callName, argsJson);
 
                                 string resultTypeLog = result.Count > 0 ? result[0].Type : "empty";
                                 string resultTextLog = result.Count > 0 && result[0].Type == "text" ? result[0].Text ?? "" : $"[{result.Count} 个 content 项]";
                                 Logger.ToolResult(callName, resultTypeLog, resultTextLog);
+                                Logger.Info($"[Chat] 工具执行完成: {callName},结果类型: {resultTypeLog}");
 
                                 // 将工具调用前累积的文本作为 assistant 消息的 content,
                                 // 避免在 tool 消息之后追加多余的 assistant 文本消息导致 API 400 错误
@@ -193,7 +214,13 @@ public class ChatBridge
                                 history.AppendTool(callId, result);
 
                                 _historyStore.Save(history);
-                                Logger.Info($"[Chat] 工具调用结果已保存到文件");
+                                Logger.Info($"[Chat] 工具调用结果已保存到文件,准备回传给AI");
+
+                                // 清空当前气泡,等待下一轮AI回复输出
+                                _dispatcher.Invoke(() =>
+                                {
+                                    sis.UpdateAllText(string.Empty);
+                                });
 
                                 Logger.ToolAiContinue(history.Messages.Count);
                             }
@@ -217,7 +244,7 @@ public class ChatBridge
                 _historyStore.Save(history);
                 Logger.Info("[Chat] 错误消息已写入历史文件");
 
-                _dispatcher.Invoke(() => sis.UpdateText("AI响应错误"));
+                _dispatcher.Invoke(() => sis.UpdateAllText("AI响应错误"));
                 _dispatcher.Invoke(() => sis.FinishGenerate());
                 throw;
             }
