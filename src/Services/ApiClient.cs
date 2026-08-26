@@ -548,34 +548,48 @@ internal static class ApiClient
     }
 
     /// <summary>
-    /// 确保每个带 tool_calls 的 assistant 消息之后都存在对应的 tool 消息。缺失时在其后
-    /// 插入占位 tool 消息,避免严格供应商(如 Deepseek)返回 400:
-    /// "An assistant message with 'tool_calls' must be followed by tool messages..."。
+    /// 确保每个带 tool_calls 的 assistant 消息之后都存在对应每个 tool_call_id 的 tool 消息。
+    /// 严格供应商(如 Deepseek)要求 assistant(tool_calls=[...]) 后必须紧跟对应 id 的 tool 消息,
+    /// 缺失则返回 400: "An assistant message with 'tool_calls' must be followed by tool messages..."。
+    /// 支持标准 OpenAI 格式的并行工具调用(一条 assistant 可含多个 tool_calls)。
     /// </summary>
     private static void EnsureToolMessages(List<ChatMessage> messages)
     {
         for (int i = 0; i < messages.Count; i++)
         {
             var m = messages[i];
-            if (m.Role != "assistant" || m.FunctionCall == null || string.IsNullOrEmpty(m.FunctionCall.Id))
+            if (m.Role != "assistant" || m.ToolCalls == null || m.ToolCalls.Count == 0)
                 continue;
 
-            string id = m.FunctionCall.Id;
-            bool found = false;
+            // 标准格式: 遍历 tool_calls 数组的每一项,分别查找对应 tool 消息
+            var requiredIds = new HashSet<string>();
+            foreach (var tc in m.ToolCalls)
+            {
+                if (!string.IsNullOrEmpty(tc.Id))
+                    requiredIds.Add(tc.Id);
+            }
+            if (requiredIds.Count == 0) continue;
+
+            var foundIds = new HashSet<string>();
             for (int j = i + 1; j < messages.Count; j++)
             {
                 var after = messages[j];
-                if (after.Role == "tool" && after.ToolCallId == id) { found = true; break; }
                 // 工具消息必须紧跟在 assistant 之后,遇到其它角色即视为缺失
                 if (after.Role == "assistant" || after.Role == "user" || after.Role == "system") break;
+                if (after.Role == "tool" && !string.IsNullOrEmpty(after.ToolCallId))
+                    foundIds.Add(after.ToolCallId);
             }
 
-            if (!found)
+            // 缺失的 id 在其后插入占位 tool 消息(保持原有顺序)
+            int insertIdx = i + 1;
+            foreach (var tc in m.ToolCalls)
             {
-                messages.Insert(i + 1, new ChatMessage
+                if (string.IsNullOrEmpty(tc.Id)) continue;
+                if (foundIds.Contains(tc.Id)) continue;
+                messages.Insert(insertIdx++, new ChatMessage
                 {
                     Role = "tool",
-                    ToolCallId = id,
+                    ToolCallId = tc.Id,
                     Content = new List<ContentItem> { new ContentItem { Type = "text", Text = "(工具结果缺失,已自动补齐)" } }
                 });
                 i++; // 跳过刚插入的占位消息
@@ -657,14 +671,15 @@ internal static class ApiClient
     }
 
     /// <summary>
-    /// 将 ChatMessage 转换为 OpenAI API 格式的消息对象。
-    /// 注意:
-    ///   - tool / assistant / system 消息的 content 转换为字符串(DeepSeek 等供应商要求字符串格式)
-    ///   - user 消息的 content 保持数组格式(支持多模态输入: 图片/音频/视频/文件)
+    /// 将 ChatMessage 转换为标准 OpenAI API 格式的消息对象。
+    /// 严格对齐 OpenAI 规范:
+    ///   - tool / assistant / system 消息的 content 为字符串
+    ///   - user 消息的 content 为数组格式(支持多模态输入)
+    ///   - assistant 工具调用使用 tool_calls 数组: [{id,type:"function",function:{name,arguments}}]
     /// </summary>
     private static object ConvertMessageToApiFormat(ChatMessage m)
     {
-        // role 为 tool 的消息: content 必须是字符串(DeepSeek 等严格供应商要求)
+        // role 为 tool 的消息: 标准格式 { role, tool_call_id, content(string) }
         if (m.Role == "tool")
         {
             return new
@@ -675,24 +690,22 @@ internal static class ApiClient
             };
         }
 
-        // role 为 assistant 且有工具调用
-        if (m.Role == "assistant" && m.FunctionCall != null)
+        // role 为 assistant 且含 tool_calls(标准 OpenAI 格式,支持并行多个工具调用)
+        if (m.Role == "assistant" && m.ToolCalls != null && m.ToolCalls.Count > 0)
         {
-            var fc = m.FunctionCall;
-            var toolCalls = new object[]
+            // 按标准格式输出 tool_calls 数组
+            var toolCalls = m.ToolCalls.ConvertAll(tc => new
             {
-                new
+                id = tc.Id,
+                type = tc.Type ?? "function",
+                function = new
                 {
-                    id = fc.Id,
-                    type = "function",
-                    function = new
-                    {
-                        name = fc.Name,
-                        arguments = fc.Arguments
-                    }
+                    name = tc.Function?.Name ?? "",
+                    arguments = tc.Function?.Arguments ?? ""
                 }
-            };
-            // 带 tool_calls 的 assistant 消息也可以有 content,但必须是字符串
+            });
+
+            // assistant 消息可同时含 content 和 tool_calls(均为标准格式)
             string textContent = ExtractTextFromContent(m.Content);
             if (!string.IsNullOrEmpty(textContent))
             {

@@ -197,8 +197,47 @@ public class ChatHistoryStore
         if (elem.TryGetProperty("ToolCallId", out var tciElem) || elem.TryGetProperty("tool_call_id", out tciElem))
             toolCallId = tciElem.GetString();
 
-        FunctionCallInfo? functionCall = null;
-        if (elem.TryGetProperty("FunctionCall", out var fcElem) || elem.TryGetProperty("function_call", out fcElem))
+        // ====== 标准 OpenAI 格式: 优先读取 tool_calls 数组 ======
+        List<ToolCallInfo>? toolCalls = null;
+        if (elem.TryGetProperty("ToolCalls", out var tcsElem) || elem.TryGetProperty("tool_calls", out tcsElem))
+        {
+            if (tcsElem.ValueKind == JsonValueKind.Array)
+            {
+                toolCalls = new List<ToolCallInfo>();
+                foreach (var tcElem in tcsElem.EnumerateArray())
+                {
+                    if (tcElem.ValueKind != JsonValueKind.Object) continue;
+                    string tcId = "";
+                    if (tcElem.TryGetProperty("id", out var idEl) || tcElem.TryGetProperty("Id", out idEl))
+                        tcId = idEl.GetString() ?? "";
+                    string tcType = "function";
+                    if (tcElem.TryGetProperty("type", out var tpEl) || tcElem.TryGetProperty("Type", out tpEl))
+                        tcType = tpEl.GetString() ?? "function";
+                    string funcName = "";
+                    string funcArgs = "";
+                    if (tcElem.TryGetProperty("function", out var funcEl) || tcElem.TryGetProperty("Function", out funcEl))
+                    {
+                        if (funcEl.ValueKind == JsonValueKind.Object)
+                        {
+                            if (funcEl.TryGetProperty("name", out var nmEl) || funcEl.TryGetProperty("Name", out nmEl))
+                                funcName = nmEl.GetString() ?? "";
+                            if (funcEl.TryGetProperty("arguments", out var agEl) || funcEl.TryGetProperty("Arguments", out agEl))
+                                funcArgs = agEl.GetString() ?? "";
+                        }
+                    }
+                    toolCalls.Add(new ToolCallInfo
+                    {
+                        Id = tcId,
+                        Type = tcType,
+                        Function = new ToolCallFunction { Name = funcName, Arguments = funcArgs }
+                    });
+                }
+                if (toolCalls.Count == 0) toolCalls = null;
+            }
+        }
+
+        // ====== 兼容旧格式: 读取单个 function_call 字段,转换为 tool_calls[1] 数组 ======
+        if (toolCalls == null && (elem.TryGetProperty("FunctionCall", out var fcElem) || elem.TryGetProperty("function_call", out fcElem)))
         {
             if (fcElem.ValueKind == JsonValueKind.Object)
             {
@@ -218,12 +257,14 @@ public class ChatHistoryStore
                 if (fcElem.TryGetProperty("arguments", out var a)) fcArgs = a.GetString() ?? "";
                 else if (fcElem.TryGetProperty("Arguments", out a)) fcArgs = a.GetString() ?? "";
 
-                functionCall = new FunctionCallInfo
+                toolCalls = new List<ToolCallInfo>
                 {
-                    Type = fcType,
-                    Id = fcId,
-                    Name = fcName,
-                    Arguments = fcArgs
+                    new ToolCallInfo
+                    {
+                        Id = fcId,
+                        Type = fcType,
+                        Function = new ToolCallFunction { Name = fcName, Arguments = fcArgs }
+                    }
                 };
             }
         }
@@ -236,9 +277,9 @@ public class ChatHistoryStore
         }
         else if (role == "assistant")
         {
-            if (functionCall != null)
+            if (toolCalls != null && toolCalls.Count > 0)
             {
-                return new ChatMessage { Role = role, Content = contentItems.Count > 0 ? contentItems : null, FunctionCall = functionCall };
+                return new ChatMessage { Role = role, Content = contentItems.Count > 0 ? contentItems : null, ToolCalls = toolCalls };
             }
             if (contentItems.Count > 0)
             {
@@ -463,10 +504,10 @@ public class ChatHistoryStore
                     if (m.Content != null && m.Content.Count > 0)
                         toSave.Add(m);
                 }
-                // assistant: 有 FunctionCall 或有 content
+                // assistant: 有 ToolCalls 数组(标准格式) 或有 content
                 else if (m.Role == "assistant")
                 {
-                    if (m.FunctionCall != null || (m.Content != null && m.Content.Count > 0))
+                    if ((m.ToolCalls != null && m.ToolCalls.Count > 0) || (m.Content != null && m.Content.Count > 0))
                         toSave.Add(m);
                 }
                 // tool: 有 ToolCallId 且有 content

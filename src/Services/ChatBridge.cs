@@ -204,12 +204,16 @@ public class ChatBridge
                                     Logger.Info($"[Chat] 工具调用前的文本已合并到 assistant tool_call 消息: {textBeforeToolCall}");
                                 }
 
-                                history.AppendAssistantToolCall(new FunctionCallInfo
+                                // 标准 OpenAI 格式: tool_calls 数组,每项为 { id, type, function: { name, arguments } }
+                                history.AppendAssistantToolCall(new ToolCallInfo
                                 {
-                                    Type = "function",
                                     Id = callId,
-                                    Name = callName,
-                                    Arguments = argsJson
+                                    Type = "function",
+                                    Function = new ToolCallFunction
+                                    {
+                                        Name = callName,
+                                        Arguments = argsJson
+                                    }
                                 }, toolCallContent);
                                 history.AppendTool(callId, result);
 

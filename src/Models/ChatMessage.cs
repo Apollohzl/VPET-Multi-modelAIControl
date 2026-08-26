@@ -4,10 +4,9 @@ using System.Text.Json.Serialization;
 namespace VPet.Plugin.PetChat.Models;
 
 /// <summary>
-/// 表示对话中的一条消息,包含角色与内容。
-/// 根据 API.md, 消息分为四种 role: system / user / assistant / tool
-/// 所有消息的 content 都以数组形式存储，与 API.md 格式一致。
-/// 所有 JSON 属性名使用全小写/snake_case，与 API.md 一致。
+/// 表示对话中的一条消息,采用标准 OpenAI 格式。
+/// 四种 role: system / user / assistant / tool
+/// 所有 JSON 属性名使用全小写/snake_case,严格对齐 OpenAI API。
 /// </summary>
 public record ChatMessage
 {
@@ -15,14 +14,16 @@ public record ChatMessage
     [JsonPropertyName("role")]
     public string Role { get; init; } = string.Empty;
 
-    /// <summary>消息内容数组，每个元素是一个 content 项（text/image_url/video_url/input_audio/file 等）。
-    /// 与 API.md 中 content 数组格式完全一致。</summary>
+    /// <summary>消息内容数组 (user 消息),字符串格式时为纯文本(assistant/tool/system)。
+    /// 发送时在 ConvertMessageToApiFormat 中按 role 做对应转换。</summary>
     [JsonPropertyName("content")]
     public List<ContentItem>? Content { get; init; }
 
-    /// <summary>工具调用信息。仅 assistant 消息且为工具调用时使用。</summary>
-    [JsonPropertyName("function_call")]
-    public FunctionCallInfo? FunctionCall { get; init; }
+    /// <summary>工具调用数组(标准 OpenAI 格式)。仅 assistant 消息且含有工具调用时使用。
+    /// 数组元素为 {id,type:"function",function:{name,arguments}}。
+    /// 支持并行多个工具调用。</summary>
+    [JsonPropertyName("tool_calls")]
+    public List<ToolCallInfo>? ToolCalls { get; init; }
 
     /// <summary>工具调用 ID。仅 role=tool 消息使用。</summary>
     [JsonPropertyName("tool_call_id")]
@@ -50,16 +51,26 @@ public record ChatMessage
 }
 
 /// <summary>
-/// 工具调用函数信息。
+/// 标准 OpenAI 工具调用元素。对应 tool_calls 数组中的一项。
+/// 每个元素包含 { id, type, function: { name, arguments } }
 /// </summary>
-public record FunctionCallInfo
+public record ToolCallInfo
 {
-    [JsonPropertyName("type")]
-    public string Type { get; init; } = "function";
-
     [JsonPropertyName("id")]
     public string Id { get; init; } = string.Empty;
 
+    [JsonPropertyName("type")]
+    public string Type { get; init; } = "function";
+
+    [JsonPropertyName("function")]
+    public ToolCallFunction Function { get; init; } = new();
+}
+
+/// <summary>
+/// 标准 OpenAI 工具调用中的 function 子对象。
+/// </summary>
+public record ToolCallFunction
+{
     [JsonPropertyName("name")]
     public string Name { get; init; } = string.Empty;
 
