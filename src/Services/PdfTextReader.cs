@@ -428,7 +428,8 @@ public static class PdfTextReader
             if (c == '(')
             {
                 i = ReadLiteralString(content, i, out string s);
-                stack.Add(s);
+                // 统一转成字节串，后续 Tj/TJ/'/" 的解码路径只处理 byte[]
+                stack.Add(Encoding.Latin1.GetBytes(s));
                 continue;
             }
 
@@ -510,6 +511,7 @@ public static class PdfTextReader
                             foreach (var item in stack.Skip(arrStart + 1))
                             {
                                 if (item is byte[] bytes) sb.Append(DecodeBytes(bytes, currentFont));
+                                else if (item is string str) sb.Append(DecodeBytes(Encoding.Latin1.GetBytes(str), currentFont));
                                 else if (item is double kern && kern < -150) sb.Append(' ');
                             }
                         }
@@ -656,7 +658,10 @@ public static class PdfTextReader
     private static byte[]? LastString(List<object> stack)
     {
         for (int i = stack.Count - 1; i >= 0; i--)
+        {
             if (stack[i] is byte[] b) return b;
+            if (stack[i] is string s) return Encoding.Latin1.GetBytes(s);
+        }
         return null;
     }
 
