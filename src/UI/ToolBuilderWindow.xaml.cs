@@ -11,11 +11,6 @@ using System.Windows.Controls;
 using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
-using ICSharpCode.AvalonEdit;
-using ICSharpCode.AvalonEdit.Document;
-using ICSharpCode.AvalonEdit.Folding;
-using ICSharpCode.AvalonEdit.Highlighting;
-using ICSharpCode.AvalonEdit.Indentation.CSharp;
 using Microsoft.Win32;
 using VPet.Plugin.PetChat.Models;
 using VPet.Plugin.PetChat.Services;
@@ -48,9 +43,10 @@ public class ToolBuilderWindow : Window
     private Button _codeModeBtn = null!;
 
     // 右侧控件
-    private TextEditor _codeEditor = null!;
+    private TextBox _codeBox = null!;
+    private TextBox _lineNumbers = null!;
+    private int _gutterLineCount;
     private TextBox _outputBox = null!;
-    private FoldingManager? _foldingManager;
 
     // 工具列表
     private ListBox _toolList = null!;
@@ -566,31 +562,62 @@ public class ToolBuilderWindow : Window
         Grid.SetRow(hint, 1);
         grid.Children.Add(hint);
 
-        // 代码编辑器（AvalonEdit）
-        _codeEditor = new TextEditor
+        // 代码编辑器（内置 TextBox + 行号栏）
+        // 原先用 AvalonEdit，但它的 DLL 内嵌了 .xshd/.cur 等资源，
+        // VPet 的代码插件检测无法解析这些资源会阻止整个 MOD 加载，故改为零依赖实现。
+        var editorGrid = new Grid { Margin = new Thickness(8, 0, 8, 4) };
+        editorGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        editorGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+        _lineNumbers = new TextBox
         {
-            SyntaxHighlighting = HighlightingManager.Instance.GetDefinition("C#"),
-            ShowLineNumbers = true,
+            IsReadOnly = true,
+            Focusable = false,
+            IsHitTestVisible = false,
+            AcceptsReturn = true,
+            TextWrapping = TextWrapping.NoWrap,
             FontFamily = new FontFamily("Consolas"),
             FontSize = 12,
-            Margin = new Thickness(8, 0, 8, 4),
-            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-            WordWrap = false
+            Foreground = Brushes.Gray,
+            Background = new SolidColorBrush(Color.FromRgb(0xF5, 0xF5, 0xF5)),
+            BorderBrush = Brushes.LightGray,
+            BorderThickness = new Thickness(1),
+            Padding = new Thickness(6, 2, 8, 2),
+            VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Hidden,
+            VerticalContentAlignment = VerticalAlignment.Top,
+            Text = "1"
         };
-        // 自动缩进（C# 风格）
-        _codeEditor.TextArea.IndentationStrategy = new CSharpIndentationStrategy(_codeEditor.Options);
-        // 代码折叠（基于大括号）
-        _foldingManager = FoldingManager.Install(_codeEditor.TextArea);
-        _codeEditor.TextChanged += (s, e) =>
+        Grid.SetColumn(_lineNumbers, 0);
+        editorGrid.Children.Add(_lineNumbers);
+
+        _codeBox = new TextBox
         {
-            UpdateFoldings();
+            AcceptsReturn = true,
+            AcceptsTab = true,
+            TextWrapping = TextWrapping.NoWrap,
+            FontFamily = new FontFamily("Consolas"),
+            FontSize = 12,
+            BorderBrush = Brushes.LightGray,
+            BorderThickness = new Thickness(0, 1, 1, 1),
+            Padding = new Thickness(6, 2, 6, 2),
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+            VerticalContentAlignment = VerticalAlignment.Top
+        };
+        _codeBox.TextChanged += (s, e) =>
+        {
+            UpdateLineNumbers();
             if (_isLoading) return;
-            _toolDef.Code = _codeEditor.Text;
+            _toolDef.Code = _codeBox.Text;
             IsDirty = true;
         };
-        Grid.SetRow(_codeEditor, 2);
-        grid.Children.Add(_codeEditor);
+        _codeBox.AddHandler(ScrollViewer.ScrollChangedEvent, new ScrollChangedEventHandler(OnCodeScroll));
+        Grid.SetColumn(_codeBox, 1);
+        editorGrid.Children.Add(_codeBox);
+
+        Grid.SetRow(editorGrid, 2);
+        grid.Children.Add(editorGrid);
 
         // 结果输出标题
         var outputTitle = new TextBlock
@@ -622,38 +649,31 @@ public class ToolBuilderWindow : Window
         return border;
     }
 
-    // ============== 代码折叠 ==============
+    // ============== 行号栏 ==============
 
-    /// <summary>根据当前文档内容刷新大括号折叠区域。</summary>
-    private void UpdateFoldings()
+    /// <summary>刷新左侧行号栏（行数变化时才重建文本）。</summary>
+    private void UpdateLineNumbers()
     {
-        if (_foldingManager == null) return;
-        var foldings = CreateNewFoldings(_codeEditor.Document, out var firstErrorOffset);
-        _foldingManager.UpdateFoldings(foldings, firstErrorOffset);
+        if (_codeBox == null || _lineNumbers == null) return;
+
+        int count = _codeBox.Text.Count(c => c == '\n') + 1;
+        if (count == _gutterLineCount) return;
+        _gutterLineCount = count;
+
+        var sb = new System.Text.StringBuilder(count * 4);
+        for (int i = 1; i <= count; i++)
+        {
+            sb.Append(i);
+            if (i < count) sb.Append('\n');
+        }
+        _lineNumbers.Text = sb.ToString();
     }
 
-    /// <summary>基于大括号匹配生成折叠区域，忽略内容过短的配对。</summary>
-    private static IEnumerable<NewFolding> CreateNewFoldings(IDocument document, out int firstErrorOffset)
+    /// <summary>代码区滚动时同步行号栏的滚动位置。</summary>
+    private void OnCodeScroll(object sender, ScrollChangedEventArgs e)
     {
-        firstErrorOffset = -1;
-        var foldings = new List<NewFolding>();
-        var startOffsets = new Stack<int>();
-
-        for (int i = 0; i < document.TextLength; i++)
-        {
-            char c = document.GetCharAt(i);
-            if (c == '{')
-                startOffsets.Push(i);
-            else if (c == '}' && startOffsets.Count > 0)
-            {
-                int startOffset = startOffsets.Pop();
-                if (startOffset < i - 1) // 至少有一些内容才折叠
-                    foldings.Add(new NewFolding(startOffset, i + 1));
-            }
-        }
-
-        foldings.Sort((a, b) => a.StartOffset.CompareTo(b.StartOffset));
-        return foldings;
+        if (_lineNumbers == null) return;
+        _lineNumbers.ScrollToVerticalOffset(e.VerticalOffset);
     }
 
     // ============== 模式切换 ==============
@@ -694,7 +714,7 @@ public class ToolBuilderWindow : Window
         _toolDef.Description = _descBox.Text;
         _toolDef.Summary = _summaryBox.Text;
         _toolDef.Parameters = _parameters.ToList();
-        _toolDef.Code = _codeEditor.Text;
+        _toolDef.Code = _codeBox.Text;
     }
 
     /// <summary>从 _toolDef 同步到 UI 控件（新建/打开后调用）。</summary>
@@ -711,7 +731,8 @@ public class ToolBuilderWindow : Window
             foreach (var p in _toolDef.Parameters)
                 _parameters.Add(p);
 
-            _codeEditor.Text = _toolDef.Code;
+            _codeBox.Text = _toolDef.Code;
+            UpdateLineNumbers();
         }
         finally
         {

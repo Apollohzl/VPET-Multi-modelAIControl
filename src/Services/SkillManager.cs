@@ -291,7 +291,7 @@ public class SkillManager
         _skills.Add(new SkillInfo
         {
             Name = "create_pdf",
-            Description = "创建PDF文档。支持标题、正文段落、列表、表格、图片和文本样式，自动添加页眉（文档标题）、页脚页码，中文字体自动嵌入。文本样式：font_size(字号磅值)、bold(粗体)、italic(斜体)、color(颜色#RRGGBB)、align(对齐:left/center/right/justify)。",
+            Description = "创建PDF文档。支持标题、正文段落、列表、表格、图片和文本样式，自动添加页眉（文档标题）、页脚页码，中文渲染正常。文本样式：font_size(字号磅值)、bold(粗体)、italic(斜体)、color(颜色#RRGGBB)、align(对齐:left/center/right/justify)。",
             Summary = "创建PDF",
             IsBuiltIn = true,
             IsEnabled = true,

@@ -45,10 +45,6 @@ public class ToolExecutor
 
     private static readonly object _remindersLock = new object();
 
-    // PDF 中文字体缓存（BaseFont.CreateFont 解析 .ttc 较慢，全局缓存复用）
-    private static iTextSharp.text.pdf.BaseFont? _pdfChineseBaseFont;
-    private static readonly object _pdfFontLock = new object();
-
     /// <summary>
     /// 默认构造函数(无 SkillManager 引用,仅支持内置工具)。
     /// </summary>
@@ -1053,6 +1049,7 @@ public class ToolExecutor
 
     private static async Task<List<ContentItem>> ExecuteCreatePdfAsync(string argumentsJson)
     {
+        var bitmaps = new List<Bitmap>();
         try
         {
             using var doc = JsonDocument.Parse(argumentsJson);
@@ -1073,73 +1070,87 @@ public class ToolExecutor
             string originalPath = savePath;
             savePath = SanitizeFilePath(savePath);
 
-            using var fs = new FileStream(savePath, FileMode.Create);
-            var pdfDoc = new iTextSharp.text.Document(iTextSharp.text.PageSize.A4, 50, 50, 50, 50);
-            var writer = iTextSharp.text.pdf.PdfWriter.GetInstance(pdfDoc, fs);
-            writer.PageEvent = new PdfPageNumberEvent(title ?? "");
-            pdfDoc.Open();
-
-            var titleFont = GetChineseFont(24, iTextSharp.text.Font.BOLD);
-            var normalFont = GetChineseFont(12, iTextSharp.text.Font.NORMAL);
-
-            pdfDoc.Add(new iTextSharp.text.Paragraph(title, titleFont));
-            pdfDoc.Add(new iTextSharp.text.Paragraph("\n"));
+            // 文档大标题
+            var blocks = new List<PdfBlock>
+            {
+                new PdfBlock { Text = title, FontSize = 22f, Bold = true, Align = PdfAlign.Center }
+            };
 
             if (contentElem.ValueKind == JsonValueKind.Array)
             {
                 foreach (var item in contentElem.EnumerateArray())
                 {
-                    string? text = item.TryGetProperty("text", out var tx) ? tx.GetString() : "";
-                    string? itemType = item.TryGetProperty("type", out var it) ? it.GetString() : "text";
+                    string itemType = item.TryGetProperty("type", out var it) ? (it.GetString() ?? "text") : "text";
+                    string text = item.TryGetProperty("text", out var tx) ? (tx.GetString() ?? "") : "";
 
-                    if (itemType == "title")
+                    switch (itemType)
                     {
-                        var (f, a) = ParsePdfItemStyle(item, 16, iTextSharp.text.Font.BOLD);
-                        pdfDoc.Add(new iTextSharp.text.Paragraph(text ?? "", f) { Alignment = a });
-                    }
-                    else if (itemType == "list")
-                    {
-                        if (item.TryGetProperty("items", out var itemsElem) && itemsElem.ValueKind == JsonValueKind.Array)
-                        {
-                            var (f, a) = ParsePdfItemStyle(item, 12, iTextSharp.text.Font.NORMAL);
-                            foreach (var listItem in itemsElem.EnumerateArray())
+                        case "title":
+                            blocks.Add(new PdfBlock
                             {
-                                pdfDoc.Add(new iTextSharp.text.Paragraph("• " + (listItem.GetString() ?? ""), f) { Alignment = a });
-                            }
-                        }
-                    }
-                    else if (itemType == "image")
-                    {
-                        if (item.TryGetProperty("image_url", out var imgUrl) && !string.IsNullOrEmpty(imgUrl.GetString()))
-                        {
-                            try
+                                Text = text,
+                                FontSize = GetPdfFontSize(item, 16f),
+                                Bold = GetPdfFlag(item, "bold", true),
+                                Italic = GetPdfFlag(item, "italic", false),
+                                Color = GetPdfColor(item),
+                                Align = GetPdfAlign(item)
+                            });
+                            break;
+
+                        case "list":
+                            if (item.TryGetProperty("items", out var itemsElem) && itemsElem.ValueKind == JsonValueKind.Array)
                             {
-                                using var http = new HttpClient();
-                                byte[] imgBytes = await http.GetByteArrayAsync(imgUrl.GetString()!);
-                                var image = iTextSharp.text.Image.GetInstance(imgBytes);
-                                image.ScaleToFit(500, 400);
-                                pdfDoc.Add(image);
+                                foreach (var listItem in itemsElem.EnumerateArray())
+                                {
+                                    blocks.Add(new PdfBlock
+                                    {
+                                        Text = listItem.GetString() ?? "",
+                                        Bullet = true,
+                                        FontSize = GetPdfFontSize(item, 12f),
+                                        Bold = GetPdfFlag(item, "bold", false),
+                                        Italic = GetPdfFlag(item, "italic", false),
+                                        Color = GetPdfColor(item),
+                                        Align = GetPdfAlign(item)
+                                    });
+                                }
                             }
-                            catch (Exception ex)
+                            break;
+
+                        case "table":
+                            blocks.Add(BuildPdfTable(item));
+                            break;
+
+                        case "image":
                             {
-                                Logger.Error($"PDF image download/embed failed: {imgUrl.GetString()}", ex);
+                                string? imageUrl = item.TryGetProperty("image_url", out var imgUrl) ? imgUrl.GetString() : null;
+                                if (!string.IsNullOrWhiteSpace(imageUrl))
+                                {
+                                    var bmp = await LoadPdfImageAsync(imageUrl!);
+                                    if (bmp != null)
+                                    {
+                                        bitmaps.Add(bmp);
+                                        blocks.Add(new PdfBlock { Kind = PdfBlockKind.Image, Picture = bmp });
+                                    }
+                                }
                             }
-                        }
+                            break;
+
+                        default:
+                            blocks.Add(new PdfBlock
+                            {
+                                Text = text,
+                                FontSize = GetPdfFontSize(item, 12f),
+                                Bold = GetPdfFlag(item, "bold", false),
+                                Italic = GetPdfFlag(item, "italic", false),
+                                Color = GetPdfColor(item),
+                                Align = GetPdfAlign(item)
+                            });
+                            break;
                     }
-                    else if (itemType == "table")
-                    {
-                        AddPdfTable(pdfDoc, item, normalFont);
-                    }
-                    else
-                    {
-                        var (f, a) = ParsePdfItemStyle(item, 12, iTextSharp.text.Font.NORMAL);
-                        pdfDoc.Add(new iTextSharp.text.Paragraph(text ?? "", f) { Alignment = a });
-                    }
-                    pdfDoc.Add(new iTextSharp.text.Paragraph("\n"));
                 }
             }
 
-            pdfDoc.Close();
+            PdfDocumentWriter.Write(savePath, title, blocks);
 
             string msg = $"create_pdf: PDF 创建成功，保存到: {savePath}";
             if (!string.Equals(originalPath, savePath, StringComparison.Ordinal))
@@ -1155,21 +1166,23 @@ public class ToolExecutor
             Logger.Error("create_pdf 执行失败", ex);
             return new List<ContentItem> { new ContentItem { Type = "text", Text = $"create_pdf 执行失败: {ex.Message}" } };
         }
+        finally
+        {
+            foreach (var bmp in bitmaps) bmp.Dispose();
+        }
     }
 
-    /// <summary>
-    /// 向 PDF 文档添加表格。
-    /// </summary>
-    private static void AddPdfTable(iTextSharp.text.Document pdfDoc, JsonElement tableElem, iTextSharp.text.Font normalFont)
+    /// <summary>把 create_pdf 的 table 元素转换成排版块。</summary>
+    private static PdfBlock BuildPdfTable(JsonElement tableElem)
     {
-        var headers = new List<string>();
-        var rows = new List<List<string>>();
+        var block = new PdfBlock { Kind = PdfBlockKind.Table };
 
         if (tableElem.TryGetProperty("headers", out var hElem) && hElem.ValueKind == JsonValueKind.Array)
         {
             foreach (var h in hElem.EnumerateArray())
-                headers.Add(h.GetString() ?? "");
+                block.Headers.Add(h.GetString() ?? "");
         }
+
         if (tableElem.TryGetProperty("rows", out var rElem) && rElem.ValueKind == JsonValueKind.Array)
         {
             foreach (var rowElem in rElem.EnumerateArray())
@@ -1178,230 +1191,84 @@ public class ToolExecutor
                 if (rowElem.ValueKind == JsonValueKind.Array)
                 {
                     foreach (var cell in rowElem.EnumerateArray())
-                        row.Add(cell.GetString() ?? "");
+                        row.Add(cell.ValueKind == JsonValueKind.String ? (cell.GetString() ?? "") : cell.ToString());
                 }
-                rows.Add(row);
+                block.Rows.Add(row);
             }
         }
 
-        int colCount = headers.Count;
-        foreach (var r in rows)
-            colCount = Math.Max(colCount, r.Count);
-        if (colCount == 0) return;
-
-        var table = new iTextSharp.text.pdf.PdfPTable(colCount)
-        {
-            WidthPercentage = 100,
-            SpacingBefore = 8,
-            SpacingAfter = 8
-        };
-
-        // Header row
-        var headerFont = GetChineseFont(11, iTextSharp.text.Font.BOLD);
-        if (headers.Count > 0)
-        {
-            foreach (var h in headers)
-            {
-                var cell = new iTextSharp.text.pdf.PdfPCell(new iTextSharp.text.Phrase(h, headerFont))
-                {
-                    BackgroundColor = new iTextSharp.text.BaseColor(230, 230, 230),
-                    HorizontalAlignment = iTextSharp.text.Element.ALIGN_CENTER,
-                    Padding = 4
-                };
-                table.AddCell(cell);
-            }
-        }
-
-        // Data rows
-        bool alternate = false;
-        foreach (var rowData in rows)
-        {
-            for (int c = 0; c < colCount; c++)
-            {
-                string cellText = c < rowData.Count ? rowData[c] : "";
-                var cell = new iTextSharp.text.pdf.PdfPCell(new iTextSharp.text.Phrase(cellText, normalFont))
-                {
-                    Padding = 3,
-                    HorizontalAlignment = iTextSharp.text.Element.ALIGN_LEFT
-                };
-                if (alternate)
-                    cell.BackgroundColor = new iTextSharp.text.BaseColor(248, 248, 248);
-                table.AddCell(cell);
-            }
-            alternate = !alternate;
-        }
-
-        pdfDoc.Add(table);
-        pdfDoc.Add(new iTextSharp.text.Paragraph("\n"));
+        return block;
     }
 
-    /// <summary>
-    /// 加载系统中文字体并嵌入 PDF（解决中文乱码）。
-    /// 优先级：微软雅黑 → 宋体 → 黑体 → 等线；找不到时返回 null（调用方回退到 FontFactory）。
-    /// </summary>
-    private static iTextSharp.text.pdf.BaseFont? GetChineseBaseFont()
+    /// <summary>下载并解码 PDF 中要嵌入的图片。</summary>
+    private static async Task<Bitmap?> LoadPdfImageAsync(string url)
     {
-        if (_pdfChineseBaseFont != null) return _pdfChineseBaseFont;
-        lock (_pdfFontLock)
+        try
         {
-            if (_pdfChineseBaseFont != null) return _pdfChineseBaseFont;
-
-            // .NET Core/.NET 5+ 默认不注册代码页编码，iTextSharp 解析 TTF 时
-            // 会因 Encoding.GetEncoding("windows-1252") 抛异常，必须先注册。
-            System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
-
-            string fontsDir = Environment.GetFolderPath(Environment.SpecialFolder.Fonts);
-            if (!Directory.Exists(fontsDir))
-                fontsDir = @"C:\Windows\Fonts";
-
-            string[] candidates =
-            {
-                Path.Combine(fontsDir, "msyh.ttc"),     // 微软雅黑
-                Path.Combine(fontsDir, "msyh.ttf"),
-                Path.Combine(fontsDir, "simsun.ttc"),   // 宋体
-                Path.Combine(fontsDir, "simhei.ttf"),   // 黑体
-                Path.Combine(fontsDir, "Deng.ttf")      // 等线
-            };
-
-            foreach (var fontFile in candidates)
-            {
-                if (!File.Exists(fontFile)) continue;
-                try
-                {
-                    // .ttc 字体集合需指定索引 ",0" 取第一个字体
-                    string name = fontFile.EndsWith(".ttc", StringComparison.OrdinalIgnoreCase)
-                        ? fontFile + ",0"
-                        : fontFile;
-                    _pdfChineseBaseFont = iTextSharp.text.pdf.BaseFont.CreateFont(
-                        name, iTextSharp.text.pdf.BaseFont.IDENTITY_H, iTextSharp.text.pdf.BaseFont.EMBEDDED);
-                    Logger.Info($"PDF 中文字体已加载并嵌入: {fontFile}");
-                    return _pdfChineseBaseFont;
-                }
-                catch (Exception ex)
-                {
-                    Logger.Info($"PDF 字体加载失败 {fontFile}: {ex.Message}");
-                }
-            }
-
-            Logger.Info("未找到可用的系统中文字体，PDF 中文可能显示为乱码");
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+            byte[] bytes = await http.GetByteArrayAsync(url);
+            using var ms = new MemoryStream(bytes);
+            using var img = Image.FromStream(ms);
+            // 复制一份，避免原始流关闭后图片数据失效
+            return new Bitmap(img);
+        }
+        catch (Exception ex)
+        {
+            Logger.Error($"PDF image download/embed failed: {url}", ex);
             return null;
         }
     }
 
-    /// <summary>
-    /// 获取指定字号/样式的 PDF 中文字体；字体加载失败时回退到 FontFactory("SimSun")。
-    /// </summary>
-    private static iTextSharp.text.Font GetChineseFont(float size, int style)
+    private static float GetPdfFontSize(JsonElement item, float fallback)
     {
-        var baseFont = GetChineseBaseFont();
-        if (baseFont != null)
-            return new iTextSharp.text.Font(baseFont, size, style);
-        return iTextSharp.text.FontFactory.GetFont("SimSun", size, style);
+        if (item.TryGetProperty("font_size", out var fs) && fs.TryGetInt32(out int size) && size > 0)
+            return size;
+        return fallback;
     }
 
-    /// <summary>
-    /// 解析 PDF 内容项的样式（font_size/bold/italic/color/align），返回 (字体, 对齐方式)。
-    /// </summary>
-    private static (iTextSharp.text.Font Font, int Alignment) ParsePdfItemStyle(JsonElement item, float defaultSize, int defaultStyle)
+    private static bool GetPdfFlag(JsonElement item, string name, bool fallback)
     {
-        float size = defaultSize;
-        int style = defaultStyle;
-        int alignment = iTextSharp.text.Element.ALIGN_LEFT;
-        iTextSharp.text.BaseColor? color = null;
-
-        if (item.TryGetProperty("font_size", out var fsElem) && fsElem.TryGetInt32(out int fs))
-            size = fs;
-        if (item.TryGetProperty("bold", out var boldElem) && boldElem.ValueKind == JsonValueKind.True)
-            style |= iTextSharp.text.Font.BOLD;
-        if (item.TryGetProperty("italic", out var italicElem) && italicElem.ValueKind == JsonValueKind.True)
-            style |= iTextSharp.text.Font.ITALIC;
-        if (item.TryGetProperty("color", out var colorElem))
+        if (!item.TryGetProperty(name, out var v)) return fallback;
+        return v.ValueKind switch
         {
-            string? hex = colorElem.GetString();
-            if (!string.IsNullOrEmpty(hex) && TryParseHexColor(hex, out var c))
-                color = c;
-        }
-        if (item.TryGetProperty("align", out var alignElem))
-        {
-            switch (alignElem.GetString())
-            {
-                case "center": alignment = iTextSharp.text.Element.ALIGN_CENTER; break;
-                case "right": alignment = iTextSharp.text.Element.ALIGN_RIGHT; break;
-                case "justify": alignment = iTextSharp.text.Element.ALIGN_JUSTIFIED; break;
-            }
-        }
-
-        var font = GetChineseFont(size, style);
-        if (color != null) font.Color = color;
-        return (font, alignment);
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            _ => fallback
+        };
     }
 
-    /// <summary>
-    /// 解析 #RRGGBB 十六进制颜色。
-    /// </summary>
-    private static bool TryParseHexColor(string hex, out iTextSharp.text.BaseColor color)
+    private static Color GetPdfColor(JsonElement item)
     {
-        color = new iTextSharp.text.BaseColor(0, 0, 0);
+        if (!item.TryGetProperty("color", out var c)) return Color.Black;
+        string? hex = c.GetString();
+        if (string.IsNullOrWhiteSpace(hex)) return Color.Black;
+
+        hex = hex.TrimStart('#');
+        if (hex.Length != 6) return Color.Black;
+
         try
         {
-            hex = hex.TrimStart('#');
-            if (hex.Length == 6)
-            {
-                int r = Convert.ToInt32(hex.Substring(0, 2), 16);
-                int g = Convert.ToInt32(hex.Substring(2, 2), 16);
-                int b = Convert.ToInt32(hex.Substring(4, 2), 16);
-                color = new iTextSharp.text.BaseColor(r, g, b);
-                return true;
-            }
+            int r = Convert.ToInt32(hex.Substring(0, 2), 16);
+            int g = Convert.ToInt32(hex.Substring(2, 2), 16);
+            int b = Convert.ToInt32(hex.Substring(4, 2), 16);
+            return Color.FromArgb(r, g, b);
         }
-        catch { }
-        return false;
+        catch
+        {
+            return Color.Black;
+        }
     }
 
-    /// <summary>
-    /// PDF 页眉/页脚/页码事件：每页顶部显示文档标题 + 分隔线，底部居中显示页码。
-    /// </summary>
-    private class PdfPageNumberEvent : iTextSharp.text.pdf.PdfPageEventHelper
+    private static PdfAlign GetPdfAlign(JsonElement item)
     {
-        private readonly string _headerText;
-        private readonly iTextSharp.text.pdf.BaseFont? _baseFont;
-
-        public PdfPageNumberEvent(string headerText)
+        if (!item.TryGetProperty("align", out var a)) return PdfAlign.Left;
+        return a.GetString() switch
         {
-            _headerText = headerText;
-            _baseFont = GetChineseBaseFont();
-        }
-
-        public override void OnEndPage(iTextSharp.text.pdf.PdfWriter writer, iTextSharp.text.Document document)
-        {
-            if (_baseFont == null) return;
-            var cb = writer.DirectContent;
-            float pageWidth = document.PageSize.Width;
-
-            // 页眉：分隔线 + 文档标题
-            cb.SetRGBColorFill(160, 160, 160);
-            cb.SetLineWidth(0.5f);
-            cb.MoveTo(document.LeftMargin, document.PageSize.Height - document.TopMargin + 12);
-            cb.LineTo(pageWidth - document.RightMargin, document.PageSize.Height - document.TopMargin + 12);
-            cb.Stroke();
-
-            cb.BeginText();
-            cb.SetFontAndSize(_baseFont, 9);
-            cb.SetRGBColorFill(120, 120, 120);
-            cb.ShowTextAligned(iTextSharp.text.Element.ALIGN_LEFT,
-                _headerText,
-                document.LeftMargin, document.PageSize.Height - document.TopMargin + 4, 0);
-            cb.EndText();
-
-            // 页脚：页码
-            cb.BeginText();
-            cb.SetFontAndSize(_baseFont, 9);
-            cb.SetRGBColorFill(128, 128, 128);
-            cb.ShowTextAligned(iTextSharp.text.Element.ALIGN_CENTER,
-                $"第 {writer.PageNumber} 页",
-                (document.LeftMargin + pageWidth - document.RightMargin) / 2f, 28, 0);
-            cb.EndText();
-        }
+            "center" => PdfAlign.Center,
+            "right" => PdfAlign.Right,
+            "justify" => PdfAlign.Justify,
+            _ => PdfAlign.Left
+        };
     }
 
     private static async Task<List<ContentItem>> ExecuteReadPdfAsync(string argumentsJson)
@@ -1418,18 +1285,8 @@ public class ToolExecutor
             if (!File.Exists(path))
                 return new List<ContentItem> { new ContentItem { Type = "text", Text = $"read_pdf: 文件不存在: {path}" } };
 
-            var result = new System.Text.StringBuilder();
-            using (var reader = new iTextSharp.text.pdf.PdfReader(path))
-            {
-                for (int i = 1; i <= reader.NumberOfPages; i++)
-                {
-                    result.AppendLine($"=== 第 {i} 页 ===");
-                    result.AppendLine(iTextSharp.text.pdf.parser.PdfTextExtractor.GetTextFromPage(reader, i));
-                    result.AppendLine();
-                }
-            }
-
-            return new List<ContentItem> { new ContentItem { Type = "text", Text = result.ToString().Trim() } };
+            string text = PdfTextReader.ReadText(path);
+            return new List<ContentItem> { new ContentItem { Type = "text", Text = text.Trim() } };
         }
         catch (Exception ex)
         {
